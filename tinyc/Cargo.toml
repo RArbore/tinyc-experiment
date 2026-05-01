@@ -1,0 +1,18 @@
+[package]
+name = "tinyc"
+version = "0.0.1"
+edition = "2024"
+
+[lib]
+name = "tinyc"
+path = "src/lib.rs"
+
+[dependencies]
+derive_more = { version = "*", features = ["from_str"] }
+egg = "*"
+rand = "*"
+rustc-hash = "*"
+lalrpop-util = { version = "*", features = ["lexer", "unicode"] }
+
+[build-dependencies]
+lalrpop = "*"
