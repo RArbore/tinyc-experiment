@@ -209,9 +209,9 @@ fn test2(y) { *y = 3; y <- test1(y); return y, *y + 1; }
 "#;
         let mut counter = 0;
         let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
-        assert_eq!(format!("{}", parsed[0]), "fn test1(x) return x;");
+        assert_eq!(format!("{}", parsed["test1"]), "fn test1(x) return x;");
         assert_eq!(
-            format!("{}", parsed[1]),
+            format!("{}", parsed["test2"]),
             "fn test2(y) { *y = 3; y <- test1(y); return y, (*y + 1); }"
         );
     }
@@ -224,7 +224,7 @@ fn test(x, y) { while x < 7 { x = x + 1; } if y < x { return y; } return x + 9; 
         let mut counter = 0;
         let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
         assert_eq!(
-            format!("{}", parsed[0]),
+            format!("{}", parsed["test"]),
             "fn test(x, y) { while (x < 7) { { x = (x + 1); } } if (y < x) { { return y; } } else { { } } return (x + 9); }"
         );
     }

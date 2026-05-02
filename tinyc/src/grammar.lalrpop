@@ -1,15 +1,17 @@
 use core::str::FromStr;
 
+use rustc_hash::FxHashMap;
+
 use crate::ast::*;
 
 grammar(counter: &mut Label);
 
-pub Program: Vec<FuncAST> = {
-    Func* => <>,
+pub Program: FxHashMap<String, FuncAST> = {
+    Func* => <>.into_iter().collect(),
 }
 
-Func: FuncAST = {
-    "fn" <name:Iden> "(" <params:List<Iden>> ")" <body:Stmt> => FuncAST { name, params, body },
+Func: (String, FuncAST) = {
+    "fn" <name:Iden> "(" <params:List<Iden>> ")" <body:Stmt> => (name.clone(), FuncAST { name, params, body }),
 }
 
 Stmt: StmtAST = {
