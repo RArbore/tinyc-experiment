@@ -31,6 +31,11 @@ pub enum StmtAST {
         expr: ExprAST,
         label: Label,
     },
+    Call {
+        vars: Vec<String>,
+        callee: String,
+        args: Vec<ExprAST>,
+    },
     IfElse {
         cond: ExprAST,
         then_body: Box<StmtAST>,
@@ -44,7 +49,7 @@ pub enum StmtAST {
         exit: Label,
     },
     Return {
-        expr: ExprAST,
+        exprs: Vec<ExprAST>,
         label: Label,
     },
 }
@@ -112,6 +117,22 @@ impl Display for StmtAST {
             }
             StmtAST::Assign { var, expr, .. } => write!(f, "{} = {};", var, expr),
             StmtAST::Store { pointer, expr, .. } => write!(f, "*{} = {};", pointer, expr),
+            StmtAST::Call { vars, callee, args } => {
+                for idx in 0..vars.len() {
+                    if idx != 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", vars[idx])?;
+                }
+                write!(f, " <- {}(", callee)?;
+                for idx in 0..args.len() {
+                    if idx != 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", args[idx])?;
+                }
+                write!(f, ");")
+            }
             StmtAST::IfElse {
                 cond,
                 then_body,
@@ -125,7 +146,16 @@ impl Display for StmtAST {
                 )
             }
             StmtAST::While { cond, body, .. } => write!(f, "while {} {{ {} }}", cond, body),
-            StmtAST::Return { expr, .. } => write!(f, "return {};", expr),
+            StmtAST::Return { exprs: expr, .. } => {
+                write!(f, "return ")?;
+                for idx in 0..expr.len() {
+                    if idx != 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", expr[idx])?;
+                }
+                write!(f, ";")
+            }
         }
     }
 }
@@ -175,12 +205,15 @@ mod tests {
     fn parse1() {
         let program = r#"
 fn test1(x) return x;
-fn test2(y) { *y = 3; return *y + 1; }
+fn test2(y) { *y = 3; y <- test1(y); return y, *y + 1; }
 "#;
         let mut counter = 0;
         let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
         assert_eq!(format!("{}", parsed[0]), "fn test1(x) return x;");
-        assert_eq!(format!("{}", parsed[1]), "fn test2(y) { *y = 3; return (*y + 1); }");
+        assert_eq!(
+            format!("{}", parsed[1]),
+            "fn test2(y) { *y = 3; y <- test1(y); return y, (*y + 1); }"
+        );
     }
 
     #[test]

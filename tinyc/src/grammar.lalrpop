@@ -16,9 +16,11 @@ Stmt: StmtAST = {
     Block => <>,
     <var:Iden> "=" <expr:BinaryExpr> ";" => StmtAST::Assign { var, expr, label: inc_label(counter) },
     "*" <pointer:BinaryExpr> "=" <expr:BinaryExpr> ";" => StmtAST::Store { pointer, expr, label: inc_label(counter) },
+    <vars:List<Iden>> "<-" <callee:Iden> "(" <args:List<BinaryExpr>> ")" ";" => StmtAST::Call { vars, callee, args },
+    <callee:Iden> "(" <args:List<BinaryExpr>> ")" ";" => StmtAST::Call { vars: vec![], callee, args },
     "if" <cond:BinaryExpr> <then_body:Block> <else_body:("else" <Block>)?> => StmtAST::IfElse { cond, then_body: Box::new(then_body), else_body: Box::new(else_body.unwrap_or_else(|| StmtAST::Block { body: vec![] })), merge: inc_label(counter) },
     "while" <cond:BinaryExpr> <body:Block> => StmtAST::While { cond, body: Box::new(body), header: inc_label(counter), exit: inc_label(counter) },
-    "return" <expr:BinaryExpr> ";" => StmtAST::Return { expr, label: inc_label(counter) },
+    "return" <exprs:List<BinaryExpr>> ";" => StmtAST::Return { exprs, label: inc_label(counter) },
 }
 
 Block: StmtAST = "{" <body:Stmt*> "}" => StmtAST::Block { body };
