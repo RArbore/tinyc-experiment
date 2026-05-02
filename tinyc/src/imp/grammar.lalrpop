@@ -5,7 +5,7 @@ use rustc_hash::FxHashMap;
 use crate::imp::ast::*;
 use crate::ssa::{BinaryOp, UnaryOp};
 
-grammar(counter: &mut Label);
+grammar(counter: &mut LabelId);
 
 pub Program: FxHashMap<String, FuncAST> = {
     Func* => <>.into_iter().collect(),

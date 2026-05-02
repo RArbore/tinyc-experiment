@@ -2,8 +2,8 @@ use core::fmt::{Display, Formatter, Result};
 
 use crate::ssa::{BinaryOp, UnaryOp};
 
-pub type Label = usize;
-pub fn inc_label(counter: &mut Label) -> Label {
+pub type LabelId = usize;
+pub fn inc_label(counter: &mut LabelId) -> LabelId {
     let label = *counter;
     *counter += 1;
     label
@@ -24,12 +24,12 @@ pub enum StmtAST {
     Assign {
         var: String,
         expr: ExprAST,
-        label: Label,
+        label: LabelId,
     },
     Store {
         pointer: ExprAST,
         expr: ExprAST,
-        label: Label,
+        label: LabelId,
     },
     Call {
         vars: Vec<String>,
@@ -40,17 +40,17 @@ pub enum StmtAST {
         cond: ExprAST,
         then_body: Box<StmtAST>,
         else_body: Box<StmtAST>,
-        merge: Label,
+        merge: LabelId,
     },
     While {
         cond: ExprAST,
         body: Box<StmtAST>,
-        header: Label,
-        exit: Label,
+        header: LabelId,
+        exit: LabelId,
     },
     Return {
         exprs: Vec<ExprAST>,
-        label: Label,
+        label: LabelId,
     },
 }
 

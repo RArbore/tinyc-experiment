@@ -1,4 +1,5 @@
 use core::cell::RefCell;
+use core::mem::replace;
 
 use derive_more::FromStr;
 use egg::{EGraph, Id, define_language};
@@ -35,7 +36,7 @@ define_language! {
         Phi(BlockId, [Id; 2]),
         Unary(UnaryOp, Id),
         Binary(BinaryOp, [Id; 2]),
-        "Load" = Load(Id),
+        Load(BlockId, Id),
         Call(CallId),
         Knot(KnotId),
     }
@@ -65,14 +66,14 @@ pub struct SSAProgram<'a> {
 }
 
 impl<'a> SSAProgram<'a> {
+    fn add_data(&mut self, data: Dataflow) -> Id {
+        self.dfg.add(data)
+    }
+
     fn add_block(&mut self, block: Block<'a>) -> BlockId {
         let id = self.cfg.len();
         self.cfg.push(block);
         id
-    }
-
-    fn erase_blocks(&mut self, remove_from: BlockId) {
-        self.cfg.truncate(remove_from);
     }
 
     fn intern_param(&mut self, var: &'a str, idx: usize) -> ParamId {
@@ -106,7 +107,7 @@ impl<'a> SSAProgram<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SSABuilder<'a, 'b> {
     ssa: &'b RefCell<SSAProgram<'a>>,
 
@@ -135,5 +136,130 @@ impl<'a, 'b> SSABuilder<'a, 'b> {
             function,
             block,
         }
+    }
+
+    pub fn assign(&mut self, var: &'a str, value: Id) {
+        self.vars.insert(var, value);
+    }
+
+    pub fn number(&self, num: i64) -> Id {
+        self.ssa.borrow_mut().add_data(Dataflow::Constant(num))
+    }
+
+    pub fn variable(&self, var: &str) -> Id {
+        self.vars[var]
+    }
+
+    pub fn unary(&self, op: UnaryOp, input: Id) -> Id {
+        self.ssa.borrow_mut().add_data(Dataflow::Unary(op, input))
+    }
+
+    pub fn binary(&self, op: BinaryOp, lhs: Id, rhs: Id) -> Id {
+        self.ssa
+            .borrow_mut()
+            .add_data(Dataflow::Binary(op, [lhs, rhs]))
+    }
+
+    pub fn load(&self, pointer: Id) -> Id {
+        self.ssa
+            .borrow_mut()
+            .add_data(Dataflow::Load(self.block, pointer))
+    }
+
+    pub fn store(&mut self, pointer: Id, value: Id) {
+        self.block = self
+            .ssa
+            .borrow_mut()
+            .add_block(Block::Store(self.block, pointer, value));
+    }
+
+    pub fn is_always_false(&self, value: Id) -> bool {
+        self.ssa.borrow().dfg[value]
+            .iter()
+            .any(|data| *data == Dataflow::Constant(0))
+    }
+
+    pub fn branch(&self, cond: Id) -> Option<Self> {
+        if self.is_always_false(cond) {
+            None
+        } else {
+            let block = self
+                .ssa
+                .borrow_mut()
+                .add_block(Block::Child(self.block, cond));
+            let mut branched = self.clone();
+            branched.block = block;
+            Some(branched)
+        }
+    }
+
+    fn intersect<'c>(
+        a: &'c FxHashMap<&'a str, Id>,
+        b: &'c FxHashMap<&'a str, Id>,
+        dfg: &'c EGraph<Dataflow, ()>,
+    ) -> impl Iterator<Item = (&'a str, Id)> + 'c {
+        a.into_iter().filter_map(|(name, a)| {
+            if let Some(b) = b.get(name)
+                && dfg.find(*a) == dfg.find(*b)
+            {
+                Some((*name, dfg.find(*a)))
+            } else {
+                None
+            }
+        })
+    }
+
+    fn difference<'c>(
+        a: &'c FxHashMap<&'a str, Id>,
+        b: &'c FxHashMap<&'a str, Id>,
+        dfg: &'c EGraph<Dataflow, ()>,
+    ) -> impl Iterator<Item = (&'a str, Id, Id)> + 'c {
+        a.into_iter().filter_map(|(name, a)| {
+            if let Some(b) = b.get(name)
+                && dfg.find(*a) != dfg.find(*b)
+            {
+                Some((*name, dfg.find(*a), dfg.find(*b)))
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn forward_merge(a: &Self, b: &Self) -> Self {
+        assert_eq!(a.function, b.function);
+        let block = a.ssa.borrow_mut().add_block(Block::Merge(a.block, b.block));
+        let mut vars: FxHashMap<&str, Id> =
+            Self::intersect(&a.vars, &b.vars, &a.ssa.borrow().dfg).collect();
+        let differences: Vec<_> = Self::difference(&a.vars, &b.vars, &a.ssa.borrow().dfg).collect();
+        for (name, a_value, b_value) in differences {
+            let phi = a
+                .ssa
+                .borrow_mut()
+                .add_data(Dataflow::Phi(block, [a_value, b_value]));
+            vars.insert(name, phi);
+        }
+        SSABuilder {
+            ssa: a.ssa,
+            vars,
+            function: a.function,
+            block,
+        }
+    }
+
+    pub fn backward_merge(&mut self, other: &Self) {
+        assert_eq!(self.function, other.function);
+        let old_self_block = replace(&mut self.ssa.borrow_mut().cfg[self.block], Block::Entry);
+        let old_self_block = self.ssa.borrow_mut().add_block(old_self_block);
+        self.ssa.borrow_mut().cfg[self.block] = Block::Merge(old_self_block, other.block);
+        let mut vars: FxHashMap<&str, Id> =
+            Self::intersect(&self.vars, &other.vars, &self.ssa.borrow().dfg).collect();
+        let differences: Vec<_> =
+            Self::difference(&self.vars, &other.vars, &self.ssa.borrow().dfg).collect();
+        for (name, _, _) in differences {
+            let knot = self.ssa.borrow_mut().intern_knot(self.block, name);
+            let knot = self.ssa.borrow_mut().add_data(Dataflow::Knot(knot));
+            vars.insert(name, knot);
+        }
+        self.vars = vars;
     }
 }
