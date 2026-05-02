@@ -2,7 +2,8 @@ use core::str::FromStr;
 
 use rustc_hash::FxHashMap;
 
-use crate::ast::*;
+use crate::imp::ast::*;
+use crate::ssa::{BinaryOp, UnaryOp};
 
 grammar(counter: &mut Label);
 

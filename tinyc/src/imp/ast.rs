@@ -1,6 +1,6 @@
 use core::fmt::{Display, Formatter, Result};
 
-use derive_more::FromStr;
+use crate::ssa::{BinaryOp, UnaryOp};
 
 pub type Label = usize;
 pub fn inc_label(counter: &mut Label) -> Label {
@@ -70,25 +70,6 @@ pub enum ExprAST {
     Load {
         pointer: Box<ExprAST>,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash, FromStr)]
-pub enum UnaryOp {
-    Neg,
-    Not,
-}
-
-#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash, FromStr)]
-pub enum BinaryOp {
-    Add,
-    Sub,
-    Mul,
-    EE,
-    NE,
-    LT,
-    LE,
-    GT,
-    GE,
 }
 
 impl Display for FuncAST {
@@ -199,7 +180,7 @@ impl Display for BinaryOp {
 
 #[cfg(test)]
 mod tests {
-    use crate::grammar::ProgramParser;
+    use crate::imp::grammar::ProgramParser;
 
     #[test]
     fn parse1() {
