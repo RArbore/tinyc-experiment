@@ -1,10 +1,11 @@
+use core::cell::RefCell;
 use core::iter::zip;
 
 use egg::Id;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::imp::ast::{ExprAST, FuncAST, StmtAST};
-use crate::ssa::{BlockId, Dataflow, SSAProgram};
+use crate::ssa::{Block, BlockId, Dataflow, SSAProgram};
 
 pub fn create_ssa<'a>(ast: &'a FxHashMap<String, FuncAST>) -> SSAProgram<'a> {
     let mut state = FIA::default();
@@ -29,9 +30,10 @@ struct Callgraph<'a> {
 
 // Flow sensitive abstraction (mapping from program variable to e-class ID).
 #[derive(Debug, Clone)]
-struct FSA<'a> {
-    vars: Option<FxHashMap<&'a str, Id>>,
-    returned: FxHashSet<Vec<Id>>,
+struct FSA<'a, 'b> {
+    vars: FxHashMap<&'a str, Id>,
+    block: BlockId,
+    returned: &'b RefCell<FxHashSet<Vec<Id>>>,
 }
 
 impl<'a> FIA<'a> {
@@ -67,35 +69,37 @@ impl<'a> FIA<'a> {
             return output;
         }
 
+        let entry = self.ssa.add_block(Block::Entry);
+        let returned = Default::default();
         let fsa = FSA {
-            vars: Some(
-                zip(func.params.iter(), params)
-                    .map(|(name, id)| (name as _, id))
-                    .collect(),
-            ),
-            returned: FxHashSet::default(),
+            vars: zip(func.params.iter(), params)
+                .map(|(name, id)| (name as _, id))
+                .collect(),
+            block: entry,
+            returned: &returned,
         };
-        let fsa = self.interp_stmt(&func.body, fsa);
-        fsa.returned
+        assert!(self.interp_stmt(&func.body, fsa).is_none());
+
+        let returned = returned.into_inner();
+        returned
             .iter()
             .for_each(|output| assert_eq!(output.len(), num_outputs));
-
         for idx in 0..num_outputs {
-            if let Some(same) = are_all_same(fsa.returned.iter().map(|output| output[idx])) {
+            if let Some(same) = are_all_same(returned.iter().map(|output| output[idx])) {
                 output[idx] = same;
             }
         }
         output
     }
 
-    fn interp_stmt(&mut self, stmt: &'a StmtAST, fsa: FSA<'a>) -> FSA<'a> {
+    fn interp_stmt<'b>(&mut self, stmt: &'a StmtAST, fsa: FSA<'a, 'b>) -> Option<FSA<'a, 'b>> {
         match stmt {
             StmtAST::Block { body } => self.interp_block(body, fsa),
-            StmtAST::Assign { var, expr, .. } => self.interp_assign(var, expr, fsa),
-            StmtAST::Store { pointer, expr, .. } => self.interp_store(pointer, expr, fsa),
+            StmtAST::Assign { var, expr, .. } => Some(self.interp_assign(var, expr, fsa)),
+            StmtAST::Store { pointer, expr, .. } => Some(self.interp_store(pointer, expr, fsa)),
             StmtAST::Call {
                 vars, callee, args, ..
-            } => self.interp_call(vars, callee, args, fsa),
+            } => Some(self.interp_call(vars, callee, args, fsa)),
             StmtAST::IfElse {
                 cond,
                 then_body,
@@ -103,48 +107,99 @@ impl<'a> FIA<'a> {
                 ..
             } => self.interp_ifelse(cond, then_body, else_body, fsa),
             StmtAST::While { cond, body, .. } => self.interp_while(cond, body, fsa),
-            StmtAST::Return { exprs, .. } => self.interp_return(exprs, fsa),
+            StmtAST::Return { exprs, .. } => {
+                self.interp_return(exprs, fsa);
+                None
+            }
         }
     }
 
-    fn interp_block(&self, body: &Vec<StmtAST>, fsa: FSA<'a>) -> FSA<'a> {
+    fn interp_block<'b>(
+        &mut self,
+        body: &'a Vec<StmtAST>,
+        mut fsa: FSA<'a, 'b>,
+    ) -> Option<FSA<'a, 'b>> {
+        for stmt in body {
+            if let Some(new_fsa) = self.interp_stmt(stmt, fsa) {
+                fsa = new_fsa
+            } else {
+                return None;
+            }
+        }
+        Some(fsa)
+    }
+
+    fn interp_assign<'b>(
+        &mut self,
+        var: &'a str,
+        expr: &'a ExprAST,
+        mut fsa: FSA<'a, 'b>,
+    ) -> FSA<'a, 'b> {
+        let value = self.interp_expr(expr, &fsa);
+        fsa.vars.insert(var, value);
+        fsa
+    }
+
+    fn interp_store<'b>(
+        &mut self,
+        pointer: &'a ExprAST,
+        expr: &'a ExprAST,
+        fsa: FSA<'a, 'b>,
+    ) -> FSA<'a, 'b> {
         todo!()
     }
 
-    fn interp_assign(&self, var: &str, expr: &ExprAST, fsa: FSA<'a>) -> FSA<'a> {
+    fn interp_call<'b>(
+        &mut self,
+        vars: &'a Vec<String>,
+        callee: &'a str,
+        args: &'a Vec<ExprAST>,
+        fsa: FSA<'a, 'b>,
+    ) -> FSA<'a, 'b> {
         todo!()
     }
 
-    fn interp_store(&self, pointer: &ExprAST, expr: &ExprAST, fsa: FSA<'a>) -> FSA<'a> {
+    fn interp_ifelse<'b>(
+        &mut self,
+        cond: &'a ExprAST,
+        then_body: &'a StmtAST,
+        else_body: &'a StmtAST,
+        fsa: FSA<'a, 'b>,
+    ) -> Option<FSA<'a, 'b>> {
         todo!()
     }
 
-    fn interp_call(
-        &self,
-        vars: &Vec<String>,
-        callee: &str,
-        args: &Vec<ExprAST>,
-        fsa: FSA<'a>,
-    ) -> FSA<'a> {
+    fn interp_while<'b>(
+        &mut self,
+        cond: &'a ExprAST,
+        body: &'a StmtAST,
+        fsa: FSA<'a, 'b>,
+    ) -> Option<FSA<'a, 'b>> {
         todo!()
     }
 
-    fn interp_ifelse(
-        &self,
-        cond: &ExprAST,
-        then_body: &StmtAST,
-        else_body: &StmtAST,
-        fsa: FSA<'a>,
-    ) -> FSA<'a> {
+    fn interp_return<'b>(&mut self, exprs: &'a Vec<ExprAST>, fsa: FSA<'a, 'b>) {
         todo!()
     }
 
-    fn interp_while(&self, cond: &ExprAST, body: &StmtAST, fsa: FSA<'a>) -> FSA<'a> {
-        todo!()
-    }
-
-    fn interp_return(&self, exprs: &Vec<ExprAST>, fsa: FSA<'a>) -> FSA<'a> {
-        todo!()
+    fn interp_expr<'b>(&mut self, expr: &'a ExprAST, fsa: &FSA<'a, 'b>) -> Id {
+        match expr {
+            ExprAST::Number(cons) => self.ssa.add_data(Dataflow::Constant(*cons)),
+            ExprAST::Variable(var) => fsa.vars[var as &str],
+            ExprAST::Unary { op, input } => {
+                let input = self.interp_expr(input, fsa);
+                self.ssa.add_data(Dataflow::Unary(*op, input))
+            }
+            ExprAST::Binary { op, lhs, rhs } => {
+                let lhs = self.interp_expr(lhs, fsa);
+                let rhs = self.interp_expr(rhs, fsa);
+                self.ssa.add_data(Dataflow::Binary(*op, [lhs, rhs]))
+            }
+            ExprAST::Load { pointer } => {
+                let pointer = self.interp_expr(pointer, fsa);
+                self.ssa.add_data(Dataflow::Load(fsa.block, pointer))
+            }
+        }
     }
 }
 
