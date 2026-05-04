@@ -35,6 +35,7 @@ pub enum StmtAST {
         vars: Vec<String>,
         callee: String,
         args: Vec<ExprAST>,
+        label: LabelId,
     },
     IfElse {
         cond: ExprAST,
@@ -98,7 +99,7 @@ impl Display for StmtAST {
             }
             StmtAST::Assign { var, expr, .. } => write!(f, "{} = {};", var, expr),
             StmtAST::Store { pointer, expr, .. } => write!(f, "*{} = {};", pointer, expr),
-            StmtAST::Call { vars, callee, args } => {
+            StmtAST::Call { vars, callee, args, .. } => {
                 for idx in 0..vars.len() {
                     if idx != 0 {
                         write!(f, ", ")?;

@@ -53,27 +53,28 @@ pub enum Block<'a> {
 pub struct SSAProgram<'a> {
     dfg: EGraph<Dataflow, ()>,
     cfg: Vec<Block<'a>>,
+    entries: FxHashMap<&'a str, BlockId>,
 
     // Intern pairs of function name and parameter index to ParamId.
     param_map: FxHashMap<(&'a str, usize), ParamId>,
     // Intern pairs of BlockId and variable name to KnotId.
     knot_map: FxHashMap<(BlockId, &'a str), KnotId>,
-    // Intern tuples of BlockId (of a Call node), function name, and return value index to CallId.
-    call_map: FxHashMap<(BlockId, &'a str, usize), CallId>,
+    // Intern tuples of BlockId (of a Call node) and return value index to CallId.
+    call_map: FxHashMap<(BlockId, usize), CallId>,
 }
 
 impl<'a> SSAProgram<'a> {
-    fn add_data(&mut self, data: Dataflow) -> Id {
+    pub fn add_data(&mut self, data: Dataflow) -> Id {
         self.dfg.add(data)
     }
 
-    fn add_block(&mut self, block: Block<'a>) -> BlockId {
+    pub fn add_block(&mut self, block: Block<'a>) -> BlockId {
         let id = self.cfg.len();
         self.cfg.push(block);
         id
     }
 
-    fn intern_param(&mut self, function: &'a str, idx: usize) -> ParamId {
+    pub fn intern_param(&mut self, function: &'a str, idx: usize) -> ParamId {
         if let Some(id) = self.param_map.get(&(function, idx)) {
             *id
         } else {
@@ -83,7 +84,7 @@ impl<'a> SSAProgram<'a> {
         }
     }
 
-    fn intern_knot(&mut self, block: BlockId, var: &'a str) -> ParamId {
+    pub fn intern_knot(&mut self, block: BlockId, var: &'a str) -> ParamId {
         if let Some(id) = self.knot_map.get(&(block, var)) {
             *id
         } else {
@@ -93,12 +94,12 @@ impl<'a> SSAProgram<'a> {
         }
     }
 
-    fn intern_call(&mut self, caller: BlockId, function: &'a str, idx: usize) -> ParamId {
-        if let Some(id) = self.call_map.get(&(caller, function, idx)) {
+    pub fn intern_call(&mut self, caller: BlockId, idx: usize) -> ParamId {
+        if let Some(id) = self.call_map.get(&(caller, idx)) {
             *id
         } else {
             let id = self.call_map.len();
-            self.call_map.insert((caller, function, idx), id);
+            self.call_map.insert((caller, idx), id);
             id
         }
     }
