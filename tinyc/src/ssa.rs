@@ -58,8 +58,8 @@ pub struct SSAProgram<'a> {
     param_map: FxHashMap<(&'a str, usize), ParamId>,
     // Intern pairs of BlockId and variable name to KnotId.
     knot_map: FxHashMap<(BlockId, &'a str), KnotId>,
-    // Intern pairs of function name and return value index to CallId.
-    call_map: FxHashMap<(&'a str, usize), CallId>,
+    // Intern tuples of BlockId (of a Call node), function name, and return value index to CallId.
+    call_map: FxHashMap<(BlockId, &'a str, usize), CallId>,
 }
 
 impl<'a> SSAProgram<'a> {
@@ -93,12 +93,12 @@ impl<'a> SSAProgram<'a> {
         }
     }
 
-    fn intern_call(&mut self, function: &'a str, idx: usize) -> ParamId {
-        if let Some(id) = self.call_map.get(&(function, idx)) {
+    fn intern_call(&mut self, caller: BlockId, function: &'a str, idx: usize) -> ParamId {
+        if let Some(id) = self.call_map.get(&(caller, function, idx)) {
             *id
         } else {
             let id = self.call_map.len();
-            self.call_map.insert((function, idx), id);
+            self.call_map.insert((caller, function, idx), id);
             id
         }
     }
