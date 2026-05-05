@@ -1,19 +1,19 @@
 use core::cell::RefCell;
 use core::iter::zip;
 
-use egg::Id;
+use egg::{Id, Symbol};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::imp::ast::{ExprAST, FuncAST, StmtAST};
 use crate::ssa::{Block, BlockId, Dataflow, SSAProgram};
 
-pub fn create_ssa<'a>(ast: &'a FxHashMap<String, FuncAST>) -> SSAProgram<'a> {
+pub fn create_ssa(ast: &FxHashMap<Symbol, FuncAST>) -> SSAProgram {
     let mut state = FIA {
         ast,
         ssa: Default::default(),
         callgraph: Default::default(),
     };
-    if let Some(main) = ast.get("main") {
+    if let Some(main) = ast.get(&Symbol::from("main")) {
         state.interp_func(main, vec![], BlockId::MAX, 0);
     }
     state.ssa
@@ -22,23 +22,23 @@ pub fn create_ssa<'a>(ast: &'a FxHashMap<String, FuncAST>) -> SSAProgram<'a> {
 // Flow insensitive abstraction (the SSA program being built and the call graph).
 #[derive(Debug)]
 struct FIA<'a> {
-    ast: &'a FxHashMap<String, FuncAST>,
-    ssa: SSAProgram<'a>,
-    callgraph: Callgraph<'a>,
+    ast: &'a FxHashMap<Symbol, FuncAST>,
+    ssa: SSAProgram,
+    callgraph: Callgraph,
 }
 
 #[derive(Debug, Default)]
-struct Callgraph<'a> {
-    callers: FxHashMap<&'a str, FxHashMap<BlockId, Vec<Id>>>,
-    params: FxHashMap<&'a str, Vec<Id>>,
+struct Callgraph {
+    callers: FxHashMap<Symbol, FxHashMap<BlockId, Vec<Id>>>,
+    params: FxHashMap<Symbol, Vec<Id>>,
 }
 
 // Flow sensitive abstraction (mapping from program variable to e-class ID).
 #[derive(Debug, Clone)]
-struct FSA<'a, 'b> {
-    vars: FxHashMap<&'a str, Id>,
+struct FSA<'a> {
+    vars: FxHashMap<Symbol, Id>,
     block: BlockId,
-    returned: &'b RefCell<FxHashSet<Vec<Id>>>,
+    returned: &'a RefCell<FxHashSet<Vec<Id>>>,
 }
 
 impl<'a> FIA<'a> {
@@ -50,7 +50,7 @@ impl<'a> FIA<'a> {
         num_outputs: usize,
     ) -> Vec<Id> {
         assert_eq!(func.params.len(), args.len());
-        let callers = self.callgraph.callers.entry(&func.name).or_default();
+        let callers = self.callgraph.callers.entry(func.name).or_default();
         callers.insert(caller, args);
         let num_callers = callers.len();
 
@@ -66,22 +66,20 @@ impl<'a> FIA<'a> {
                 if let Some(same) = are_all_same(args_at_idx) {
                     same
                 } else {
-                    let param = self.ssa.intern_param(&func.name, idx);
+                    let param = self.ssa.intern_param(func.name, idx);
                     self.ssa.add_data(Dataflow::Param(param))
                 }
             })
             .collect();
 
-        if self.callgraph.params.get(&func.name as &str) != Some(&params) {
-            self.callgraph
-                .params
-                .insert(&func.name as &str, params.clone());
+        if self.callgraph.params.get(&func.name) != Some(&params) {
+            self.callgraph.params.insert(func.name, params.clone());
             let entry = self.ssa.add_block(Block::Entry);
-            self.ssa.add_entry(&func.name, entry);
+            self.ssa.add_entry(func.name, entry);
             let returned = Default::default();
             let fsa = FSA {
                 vars: zip(func.params.iter(), params)
-                    .map(|(name, id)| (name as _, id))
+                    .map(|(name, id)| (*name, id))
                     .collect(),
                 block: entry,
                 returned: &returned,
@@ -104,14 +102,14 @@ impl<'a> FIA<'a> {
         output
     }
 
-    fn interp_stmt<'b>(&mut self, stmt: &'a StmtAST, fsa: FSA<'a, 'b>) -> Option<FSA<'a, 'b>> {
+    fn interp_stmt<'b>(&mut self, stmt: &'a StmtAST, fsa: FSA<'b>) -> Option<FSA<'b>> {
         match stmt {
             StmtAST::Block { body } => self.interp_block(body, fsa),
-            StmtAST::Assign { var, expr, .. } => Some(self.interp_assign(var, expr, fsa)),
+            StmtAST::Assign { var, expr, .. } => Some(self.interp_assign(*var, expr, fsa)),
             StmtAST::Store { pointer, expr, .. } => Some(self.interp_store(pointer, expr, fsa)),
             StmtAST::Call {
                 vars, callee, args, ..
-            } => Some(self.interp_call(vars, callee, args, fsa)),
+            } => Some(self.interp_call(vars, *callee, args, fsa)),
             StmtAST::IfElse {
                 cond,
                 then_body,
@@ -126,11 +124,7 @@ impl<'a> FIA<'a> {
         }
     }
 
-    fn interp_block<'b>(
-        &mut self,
-        body: &'a Vec<StmtAST>,
-        mut fsa: FSA<'a, 'b>,
-    ) -> Option<FSA<'a, 'b>> {
+    fn interp_block<'b>(&mut self, body: &'a Vec<StmtAST>, mut fsa: FSA<'b>) -> Option<FSA<'b>> {
         for stmt in body {
             if let Some(new_fsa) = self.interp_stmt(stmt, fsa) {
                 fsa = new_fsa
@@ -141,12 +135,7 @@ impl<'a> FIA<'a> {
         Some(fsa)
     }
 
-    fn interp_assign<'b>(
-        &mut self,
-        var: &'a str,
-        expr: &'a ExprAST,
-        mut fsa: FSA<'a, 'b>,
-    ) -> FSA<'a, 'b> {
+    fn interp_assign<'b>(&mut self, var: Symbol, expr: &'a ExprAST, mut fsa: FSA<'b>) -> FSA<'b> {
         let value = self.interp_expr(expr, &fsa);
         fsa.vars.insert(var, value);
         fsa
@@ -156,8 +145,8 @@ impl<'a> FIA<'a> {
         &mut self,
         pointer: &'a ExprAST,
         expr: &'a ExprAST,
-        mut fsa: FSA<'a, 'b>,
-    ) -> FSA<'a, 'b> {
+        mut fsa: FSA<'b>,
+    ) -> FSA<'b> {
         let pointer = self.interp_expr(pointer, &fsa);
         let expr = self.interp_expr(expr, &fsa);
         let store = self.ssa.add_block(Block::Store(fsa.block, pointer, expr));
@@ -167,19 +156,19 @@ impl<'a> FIA<'a> {
 
     fn interp_call<'b>(
         &mut self,
-        vars: &'a Vec<String>,
-        callee: &'a str,
+        vars: &'a Vec<Symbol>,
+        callee: Symbol,
         args: &'a Vec<ExprAST>,
-        mut fsa: FSA<'a, 'b>,
-    ) -> FSA<'a, 'b> {
+        mut fsa: FSA<'b>,
+    ) -> FSA<'b> {
         let args: Vec<_> = args.iter().map(|arg| self.interp_expr(arg, &fsa)).collect();
         let caller = self
             .ssa
             .add_block(Block::Call(fsa.block, callee, args.clone()));
-        let outputs = self.interp_func(&self.ast[callee], args, caller, vars.len());
+        let outputs = self.interp_func(&self.ast[&callee], args, caller, vars.len());
         fsa.block = caller;
         for (var, output) in zip(vars, outputs.into_iter()) {
-            fsa.vars.insert(var, output);
+            fsa.vars.insert(*var, output);
         }
         fsa
     }
@@ -189,8 +178,8 @@ impl<'a> FIA<'a> {
         cond: &'a ExprAST,
         then_body: &'a StmtAST,
         else_body: &'a StmtAST,
-        fsa: FSA<'a, 'b>,
-    ) -> Option<FSA<'a, 'b>> {
+        fsa: FSA<'b>,
+    ) -> Option<FSA<'b>> {
         todo!()
     }
 
@@ -198,12 +187,12 @@ impl<'a> FIA<'a> {
         &mut self,
         cond: &'a ExprAST,
         body: &'a StmtAST,
-        fsa: FSA<'a, 'b>,
-    ) -> Option<FSA<'a, 'b>> {
+        fsa: FSA<'b>,
+    ) -> Option<FSA<'b>> {
         todo!()
     }
 
-    fn interp_return<'b>(&mut self, exprs: &'a Vec<ExprAST>, fsa: FSA<'a, 'b>) {
+    fn interp_return<'b>(&mut self, exprs: &'a Vec<ExprAST>, fsa: FSA<'b>) {
         let values: Vec<_> = exprs
             .iter()
             .map(|expr| self.interp_expr(expr, &fsa))
@@ -212,10 +201,10 @@ impl<'a> FIA<'a> {
         fsa.returned.borrow_mut().insert(values);
     }
 
-    fn interp_expr<'b>(&mut self, expr: &'a ExprAST, fsa: &FSA<'a, 'b>) -> Id {
+    fn interp_expr<'b>(&mut self, expr: &'a ExprAST, fsa: &FSA<'b>) -> Id {
         match expr {
             ExprAST::Number(cons) => self.ssa.add_data(Dataflow::Constant(*cons)),
-            ExprAST::Variable(var) => fsa.vars[var as &str],
+            ExprAST::Variable(var) => fsa.vars[var],
             ExprAST::Unary { op, input } => {
                 let input = self.interp_expr(input, fsa);
                 self.ssa.add_data(Dataflow::Unary(*op, input))
@@ -262,5 +251,6 @@ fn foo(x) return x + 1;
         let mut counter = 0;
         let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
         let ssa = create_ssa(&parsed);
+        panic!("{:#?}", ssa);
     }
 }

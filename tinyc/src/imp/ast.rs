@@ -1,5 +1,7 @@
 use core::fmt::{Display, Formatter, Result};
 
+use egg::Symbol;
+
 use crate::ssa::{BinaryOp, UnaryOp};
 
 pub type LabelId = usize;
@@ -11,8 +13,8 @@ pub fn inc_label(counter: &mut LabelId) -> LabelId {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FuncAST {
-    pub name: String,
-    pub params: Vec<String>,
+    pub name: Symbol,
+    pub params: Vec<Symbol>,
     pub body: StmtAST,
 }
 
@@ -22,7 +24,7 @@ pub enum StmtAST {
         body: Vec<StmtAST>,
     },
     Assign {
-        var: String,
+        var: Symbol,
         expr: ExprAST,
         label: LabelId,
     },
@@ -32,8 +34,8 @@ pub enum StmtAST {
         label: LabelId,
     },
     Call {
-        vars: Vec<String>,
-        callee: String,
+        vars: Vec<Symbol>,
+        callee: Symbol,
         args: Vec<ExprAST>,
         label: LabelId,
     },
@@ -58,7 +60,7 @@ pub enum StmtAST {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExprAST {
     Number(i64),
-    Variable(String),
+    Variable(Symbol),
     Unary {
         op: UnaryOp,
         input: Box<ExprAST>,
@@ -75,12 +77,12 @@ pub enum ExprAST {
 
 impl Display for FuncAST {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        write!(f, "fn {}(", self.name)?;
+        write!(f, "fn {}(", self.name.as_str())?;
         for idx in 0..self.params.len() {
             if idx != 0 {
                 write!(f, ", ")?;
             }
-            write!(f, "{}", self.params[idx])?;
+            write!(f, "{}", self.params[idx].as_str())?;
         }
         write!(f, ") {}", self.body)
     }
@@ -97,16 +99,18 @@ impl Display for StmtAST {
                 }
                 write!(f, "}}")
             }
-            StmtAST::Assign { var, expr, .. } => write!(f, "{} = {};", var, expr),
+            StmtAST::Assign { var, expr, .. } => write!(f, "{} = {};", var.as_str(), expr),
             StmtAST::Store { pointer, expr, .. } => write!(f, "*{} = {};", pointer, expr),
-            StmtAST::Call { vars, callee, args, .. } => {
+            StmtAST::Call {
+                vars, callee, args, ..
+            } => {
                 for idx in 0..vars.len() {
                     if idx != 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{}", vars[idx])?;
+                    write!(f, "{}", vars[idx].as_str())?;
                 }
-                write!(f, " <- {}(", callee)?;
+                write!(f, " <- {}(", callee.as_str())?;
                 for idx in 0..args.len() {
                     if idx != 0 {
                         write!(f, ", ")?;
@@ -146,7 +150,7 @@ impl Display for ExprAST {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         match self {
             ExprAST::Number(num) => num.fmt(f),
-            ExprAST::Variable(name) => name.fmt(f),
+            ExprAST::Variable(name) => name.as_str().fmt(f),
             ExprAST::Unary { op, input } => write!(f, "{}{}", op, input),
             ExprAST::Binary { op, lhs, rhs } => write!(f, "({} {} {})", lhs, op, rhs),
             ExprAST::Load { pointer } => write!(f, "*{}", pointer),
@@ -181,6 +185,8 @@ impl Display for BinaryOp {
 
 #[cfg(test)]
 mod tests {
+    use egg::Symbol;
+    
     use crate::imp::grammar::ProgramParser;
 
     #[test]
@@ -191,9 +197,9 @@ fn test2(y) { *y = 3; y <- test1(y); return y, *y + 1; }
 "#;
         let mut counter = 0;
         let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
-        assert_eq!(format!("{}", parsed["test1"]), "fn test1(x) return x;");
+        assert_eq!(format!("{}", parsed[&Symbol::from("test1")]), "fn test1(x) return x;");
         assert_eq!(
-            format!("{}", parsed["test2"]),
+            format!("{}", parsed[&Symbol::from("test2")]),
             "fn test2(y) { *y = 3; y <- test1(y); return y, (*y + 1); }"
         );
     }
@@ -206,7 +212,7 @@ fn test(x, y) { while x < 7 { x = x + 1; } if y < x { return y; } return x + 9; 
         let mut counter = 0;
         let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
         assert_eq!(
-            format!("{}", parsed["test"]),
+            format!("{}", parsed[&Symbol::from("test")]),
             "fn test(x, y) { while (x < 7) { { x = (x + 1); } } if (y < x) { { return y; } } else { { } } return (x + 9); }"
         );
     }

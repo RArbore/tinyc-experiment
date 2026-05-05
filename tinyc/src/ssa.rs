@@ -1,5 +1,5 @@
 use derive_more::FromStr;
-use egg::{EGraph, Id, define_language};
+use egg::{EGraph, Id, define_language, Symbol};
 use rustc_hash::FxHashMap;
 
 #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash, FromStr)]
@@ -40,45 +40,45 @@ define_language! {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Block<'a> {
+pub enum Block {
     Entry,
     Child(BlockId, Id),
     Merge(BlockId, BlockId),
     Store(BlockId, Id, Id),
-    Call(BlockId, &'a str, Vec<Id>),
+    Call(BlockId, Symbol, Vec<Id>),
     Return(BlockId, Vec<Id>),
 }
 
 #[derive(Debug, Default)]
-pub struct SSAProgram<'a> {
+pub struct SSAProgram {
     dfg: EGraph<Dataflow, ()>,
-    cfg: Vec<Block<'a>>,
-    entries: FxHashMap<&'a str, BlockId>,
+    cfg: Vec<Block>,
+    entries: FxHashMap<Symbol, BlockId>,
 
     // Intern pairs of function name and parameter index to ParamId.
-    param_map: FxHashMap<(&'a str, usize), ParamId>,
+    param_map: FxHashMap<(Symbol, usize), ParamId>,
     // Intern pairs of BlockId and variable name to KnotId.
-    knot_map: FxHashMap<(BlockId, &'a str), KnotId>,
+    knot_map: FxHashMap<(BlockId, Symbol), KnotId>,
     // Intern tuples of BlockId (of a Call node) and return value index to CallId.
     call_map: FxHashMap<(BlockId, usize), CallId>,
 }
 
-impl<'a> SSAProgram<'a> {
+impl SSAProgram {
     pub fn add_data(&mut self, data: Dataflow) -> Id {
         self.dfg.add(data)
     }
 
-    pub fn add_block(&mut self, block: Block<'a>) -> BlockId {
+    pub fn add_block(&mut self, block: Block) -> BlockId {
         let id = self.cfg.len();
         self.cfg.push(block);
         id
     }
 
-    pub fn add_entry(&mut self, function: &'a str, block: BlockId) {
+    pub fn add_entry(&mut self, function: Symbol, block: BlockId) {
         self.entries.insert(function, block);
     }
 
-    pub fn intern_param(&mut self, function: &'a str, idx: usize) -> ParamId {
+    pub fn intern_param(&mut self, function: Symbol, idx: usize) -> ParamId {
         if let Some(id) = self.param_map.get(&(function, idx)) {
             *id
         } else {
@@ -88,7 +88,7 @@ impl<'a> SSAProgram<'a> {
         }
     }
 
-    pub fn intern_knot(&mut self, block: BlockId, var: &'a str) -> ParamId {
+    pub fn intern_knot(&mut self, block: BlockId, var: Symbol) -> ParamId {
         if let Some(id) = self.knot_map.get(&(block, var)) {
             *id
         } else {

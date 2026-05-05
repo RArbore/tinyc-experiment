@@ -1,5 +1,6 @@
 use core::str::FromStr;
 
+use egg::Symbol;
 use rustc_hash::FxHashMap;
 
 use crate::imp::ast::*;
@@ -7,12 +8,12 @@ use crate::ssa::{BinaryOp, UnaryOp};
 
 grammar(counter: &mut LabelId);
 
-pub Program: FxHashMap<String, FuncAST> = {
+pub Program: FxHashMap<Symbol, FuncAST> = {
     Func* => <>.into_iter().collect(),
 }
 
-Func: (String, FuncAST) = {
-    "fn" <name:Iden> "(" <params:List<Iden>> ")" <body:Stmt> => (name.clone(), FuncAST { name, params, body }),
+Func: (Symbol, FuncAST) = {
+    "fn" <name:Iden> "(" <params:List<Iden>> ")" <body:Stmt> => (name, FuncAST { name: name, params, body }),
 }
 
 Stmt: StmtAST = {
@@ -58,7 +59,7 @@ Atomic: ExprAST = {
     "(" <BinaryExpr> ")",
 }
 
-Iden: String = r"[a-zA-Z_][a-zA-Z0-9_]*" => <>.to_string();
+Iden: Symbol = r"[a-zA-Z_][a-zA-Z0-9_]*" => Symbol::from(<>);
 Num: i64 = r"-?[0-9]+" => i64::from_str(<>).unwrap();
 
 List<T>: Vec<T> = {
