@@ -65,30 +65,34 @@ impl<'a> FIA<'a> {
                 }
             })
             .collect();
-        if self.callgraph.params.get(&func.name as &str) == Some(&params) {
-            return output;
-        }
 
-        let entry = self.ssa.add_block(Block::Entry);
-        let returned = Default::default();
-        let fsa = FSA {
-            vars: zip(func.params.iter(), params)
-                .map(|(name, id)| (name as _, id))
-                .collect(),
-            block: entry,
-            returned: &returned,
-        };
-        assert!(self.interp_stmt(&func.body, fsa).is_none());
+        if self.callgraph.params.get(&func.name as &str) != Some(&params) {
+            self.callgraph
+                .params
+                .insert(&func.name as &str, params.clone());
 
-        let returned = returned.into_inner();
-        returned
-            .iter()
-            .for_each(|output| assert_eq!(output.len(), num_outputs));
-        for idx in 0..num_outputs {
-            if let Some(same) = are_all_same(returned.iter().map(|output| output[idx])) {
-                output[idx] = same;
+            let entry = self.ssa.add_block(Block::Entry);
+            let returned = Default::default();
+            let fsa = FSA {
+                vars: zip(func.params.iter(), params)
+                    .map(|(name, id)| (name as _, id))
+                    .collect(),
+                block: entry,
+                returned: &returned,
+            };
+            assert!(self.interp_stmt(&func.body, fsa).is_none());
+
+            let returned = returned.into_inner();
+            returned
+                .iter()
+                .for_each(|output| assert_eq!(output.len(), num_outputs));
+            for idx in 0..num_outputs {
+                if let Some(same) = are_all_same(returned.iter().map(|output| output[idx])) {
+                    output[idx] = same;
+                }
             }
         }
+
         output
     }
 
@@ -144,9 +148,13 @@ impl<'a> FIA<'a> {
         &mut self,
         pointer: &'a ExprAST,
         expr: &'a ExprAST,
-        fsa: FSA<'a, 'b>,
+        mut fsa: FSA<'a, 'b>,
     ) -> FSA<'a, 'b> {
-        todo!()
+        let pointer = self.interp_expr(pointer, &fsa);
+        let expr = self.interp_expr(expr, &fsa);
+        let store = self.ssa.add_block(Block::Store(fsa.block, pointer, expr));
+        fsa.block = store;
+        fsa
     }
 
     fn interp_call<'b>(
@@ -179,7 +187,11 @@ impl<'a> FIA<'a> {
     }
 
     fn interp_return<'b>(&mut self, exprs: &'a Vec<ExprAST>, fsa: FSA<'a, 'b>) {
-        todo!()
+        let values = exprs
+            .iter()
+            .map(|expr| self.interp_expr(expr, &fsa))
+            .collect();
+        fsa.returned.borrow_mut().insert(values);
     }
 
     fn interp_expr<'b>(&mut self, expr: &'a ExprAST, fsa: &FSA<'a, 'b>) -> Id {
