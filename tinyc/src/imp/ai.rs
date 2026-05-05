@@ -251,6 +251,6 @@ fn foo(x) return x + 1;
         let mut counter = 0;
         let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
         let ssa = create_ssa(&parsed);
-        panic!("{:#?}", ssa);
+        panic!("{}", ssa);
     }
 }

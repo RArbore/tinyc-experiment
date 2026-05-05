@@ -1,5 +1,8 @@
+use core::cmp::max;
+use core::fmt::{Display, Formatter, Result};
+
 use derive_more::FromStr;
-use egg::{EGraph, Id, define_language, Symbol};
+use egg::{EGraph, Id, Symbol, define_language};
 use rustc_hash::FxHashMap;
 
 #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash, FromStr)]
@@ -106,5 +109,64 @@ impl SSAProgram {
             self.call_map.insert((caller, idx), id);
             id
         }
+    }
+}
+
+impl Display for SSAProgram {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        writeln!(f, "DFG:")?;
+        let mut classes: Vec<_> = self.dfg.classes().collect();
+        let indent = max(classes.len().ilog10(), self.cfg.len().ilog10()) + 3;
+        classes.sort_by_key(|class| class.id);
+        for class in classes {
+            write!(f, "{}:", class.id)?;
+            for _ in 0..(indent - usize::from(class.id).checked_ilog10().unwrap_or(0) - 2) {
+                write!(f, " ")?;
+            }
+            writeln!(f, "{:?}", class.nodes[0])?;
+            for node in &class.nodes[1..] {
+                for _ in 0..indent {
+                    write!(f, " ")?;
+                }
+                writeln!(f, "{:?}", node)?;
+            }
+        }
+
+        writeln!(f, "\nCFG:")?;
+        for (id, block) in self.cfg.iter().enumerate() {
+            write!(f, "{}:", id)?;
+            for _ in 0..(indent - usize::from(id).checked_ilog10().unwrap_or(0) - 2) {
+                write!(f, " ")?;
+            }
+            writeln!(f, "{:?}", block)?;
+        }
+
+        writeln!(f, "\nEntries:")?;
+        for (func, entry) in &self.entries {
+            writeln!(f, "{}: {}", func, entry)?;
+        }
+
+        if !self.param_map.is_empty() {
+            writeln!(f, "\nParam IDs:")?;
+            for ((func, idx), id) in &self.param_map {
+                writeln!(f, "{}, {}: {}", func, idx, id)?;
+            }
+        }
+
+        if !self.knot_map.is_empty() {
+            writeln!(f, "\nKnot IDs:")?;
+            for ((block, var), id) in &self.knot_map {
+                writeln!(f, "{}, {}: {}", block, var, id)?;
+            }
+        }
+
+        if !self.call_map.is_empty() {
+            writeln!(f, "\nCall IDs:")?;
+            for ((caller, idx), id) in &self.call_map {
+                writeln!(f, "{}, {}: {}", caller, idx, id)?;
+            }
+        }
+
+        Ok(())
     }
 }
