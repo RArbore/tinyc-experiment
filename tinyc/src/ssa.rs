@@ -74,6 +74,10 @@ impl<'a> SSAProgram<'a> {
         id
     }
 
+    pub fn add_entry(&mut self, function: &'a str, block: BlockId) {
+        self.entries.insert(function, block);
+    }
+
     pub fn intern_param(&mut self, function: &'a str, idx: usize) -> ParamId {
         if let Some(id) = self.param_map.get(&(function, idx)) {
             *id
