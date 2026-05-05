@@ -14,7 +14,7 @@ pub fn create_ssa(ast: &FxHashMap<Symbol, FuncAST>) -> SSAProgram {
         callgraph: Default::default(),
     };
     if let Some(main) = ast.get(&Symbol::from("main")) {
-        state.interp_func(main, vec![], BlockId::MAX, 0);
+        state.interp_func(main, vec![]);
     }
     state.ssa
 }
@@ -30,7 +30,7 @@ struct FIA<'a> {
 #[derive(Debug, Default)]
 struct Callgraph {
     callers: FxHashMap<Symbol, FxHashMap<BlockId, Vec<Id>>>,
-    params: FxHashMap<Symbol, Vec<Id>>,
+    outputs: FxHashMap<Symbol, Vec<Id>>,
 }
 
 // Flow sensitive abstraction (mapping from program variable to e-class ID).
@@ -38,68 +38,40 @@ struct Callgraph {
 struct FSA<'a> {
     vars: FxHashMap<Symbol, Id>,
     block: BlockId,
-    returned: &'a RefCell<FxHashSet<Vec<Id>>>,
+    returned: &'a RefCell<FxHashSet<(BlockId, Vec<Id>)>>,
 }
 
 impl<'a> FIA<'a> {
-    fn interp_func(
-        &mut self,
-        func: &'a FuncAST,
-        args: Vec<Id>,
-        caller: BlockId,
-        num_outputs: usize,
-    ) -> Vec<Id> {
-        assert_eq!(func.params.len(), args.len());
-        let callers = self.callgraph.callers.entry(func.name).or_default();
-        callers.insert(caller, args);
-        let num_callers = callers.len();
+    fn interp_func(&mut self, func: &'a FuncAST, args: Vec<Id>) -> Vec<Id> {
+        let entry = self.ssa.add_block(Block::Entry);
+        self.ssa.add_entry(func.name, entry);
+        let returned = Default::default();
+        let fsa = FSA {
+            vars: zip(func.params.iter(), args)
+                .map(|(name, id)| (*name, id))
+                .collect(),
+            block: entry,
+            returned: &returned,
+        };
+        assert!(self.interp_stmt(&func.body, fsa).is_none());
 
-        let mut output: Vec<_> = (0..num_outputs)
-            .map(|idx| {
-                let call = self.ssa.intern_call(caller, idx);
-                self.ssa.add_data(Dataflow::Call(call))
-            })
-            .collect();
-        let params = (0..func.params.len())
-            .map(|idx| {
-                let args_at_idx = callers.iter().map(|(_, args)| args[idx]);
-                if let Some(same) = are_all_same(args_at_idx) {
-                    same
-                } else {
-                    let param = self.ssa.intern_param(func.name, idx);
-                    self.ssa.add_data(Dataflow::Param(param))
-                }
-            })
-            .collect();
-
-        if self.callgraph.params.get(&func.name) != Some(&params) {
-            self.callgraph.params.insert(func.name, params.clone());
-            let entry = self.ssa.add_block(Block::Entry);
-            self.ssa.add_entry(func.name, entry);
-            let returned = Default::default();
-            let fsa = FSA {
-                vars: zip(func.params.iter(), params)
-                    .map(|(name, id)| (*name, id))
-                    .collect(),
-                block: entry,
-                returned: &returned,
-            };
-            assert!(self.interp_stmt(&func.body, fsa).is_none());
-
-            let returned = returned.into_inner();
-            returned
-                .iter()
-                .for_each(|output| assert_eq!(output.len(), num_outputs));
-            for idx in 0..num_outputs {
-                if num_callers < 2
-                    && let Some(same) = are_all_same(returned.iter().map(|output| output[idx]))
-                {
-                    output[idx] = same;
+        let mut returned = returned.into_inner().into_iter();
+        let (mut acc_block, mut acc_values) = returned.next().unwrap();
+        for (new_block, new_values) in returned {
+            acc_block = self.ssa.add_block(Block::Merge(acc_block, new_block));
+            assert_eq!(acc_values.len(), new_values.len());
+            for idx in 0..acc_values.len() {
+                if acc_values[idx] != new_values[idx] {
+                    acc_values[idx] = self
+                        .ssa
+                        .add_data(Dataflow::Phi(acc_block, [acc_values[idx], new_values[idx]]));
                 }
             }
         }
 
-        output
+        self.ssa
+            .add_block(Block::Return(acc_block, acc_values.clone()));
+        acc_values
     }
 
     fn interp_stmt<'b>(&mut self, stmt: &'a StmtAST, fsa: FSA<'b>) -> Option<FSA<'b>> {
@@ -162,11 +134,8 @@ impl<'a> FIA<'a> {
         mut fsa: FSA<'b>,
     ) -> FSA<'b> {
         let args: Vec<_> = args.iter().map(|arg| self.interp_expr(arg, &fsa)).collect();
-        let caller = self
-            .ssa
-            .add_block(Block::Call(fsa.block, callee, args.clone()));
-        let outputs = self.interp_func(&self.ast[&callee], args, caller, vars.len());
-        fsa.block = caller;
+        let outputs = self.interp_func(&self.ast[&callee], args.clone());
+        fsa.block = self.ssa.add_block(Block::Call(fsa.block, callee, args));
         for (var, output) in zip(vars, outputs.into_iter()) {
             fsa.vars.insert(*var, output);
         }
@@ -197,8 +166,7 @@ impl<'a> FIA<'a> {
             .iter()
             .map(|expr| self.interp_expr(expr, &fsa))
             .collect();
-        self.ssa.add_block(Block::Return(fsa.block, values.clone()));
-        fsa.returned.borrow_mut().insert(values);
+        fsa.returned.borrow_mut().insert((fsa.block, values));
     }
 
     fn interp_expr<'b>(&mut self, expr: &'a ExprAST, fsa: &FSA<'b>) -> Id {
@@ -245,7 +213,7 @@ mod tests {
     #[test]
     fn translate1() {
         let program = r#"
-fn main() { x <- foo(5); y <- foo(3); z = x + y; *z = z; return; }
+fn main() { x <- foo(5); y <- foo(3); return x + y; }
 fn foo(x) return x + 1;
 "#;
         let mut counter = 0;
