@@ -4,7 +4,7 @@ use core::iter::zip;
 use egg::{Id, Symbol};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::imp::ast::{ExprAST, FuncAST, StmtAST};
+use crate::imp::ast::{ExprAST, FuncAST, StmtAST, LabelId};
 use crate::ssa::{Block, BlockId, Dataflow, SSAProgram};
 
 pub fn create_ssa(ast: &FxHashMap<Symbol, FuncAST>) -> SSAProgram {
@@ -29,7 +29,7 @@ struct FIA<'a> {
 
 #[derive(Debug, Default)]
 struct Callgraph {
-    callers: FxHashMap<Symbol, FxHashMap<BlockId, Vec<Id>>>,
+    callers: FxHashMap<Symbol, FxHashSet<LabelId>>,
     param_nodes: FxHashMap<Symbol, Vec<Id>>,
 }
 
@@ -45,12 +45,19 @@ impl<'a> FIA<'a> {
     fn interp_func(&mut self, func: &'a FuncAST, args: Vec<Id>) -> Vec<Id> {
         let entry = self.ssa.add_block(Block::Entry);
         self.ssa.add_entry(func.name, entry);
+        let (values, block) = self.interp_func_naked(func, args, entry);
+        self.ssa
+            .add_block(Block::Return(block, values.clone()));
+        values
+    }
+
+    fn interp_func_naked(&mut self, func: &'a FuncAST, args: Vec<Id>, block: BlockId) -> (Vec<Id>, BlockId) {
         let returned = Default::default();
         let fsa = FSA {
             vars: zip(func.params.iter(), args)
                 .map(|(name, id)| (*name, id))
                 .collect(),
-            block: entry,
+            block,
             returned: &returned,
         };
         assert!(self.interp_stmt(&func.body, fsa).is_none());
@@ -68,10 +75,7 @@ impl<'a> FIA<'a> {
                 }
             }
         }
-
-        self.ssa
-            .add_block(Block::Return(acc_block, acc_values.clone()));
-        acc_values
+        (acc_values, acc_block)
     }
 
     fn interp_stmt<'b>(&mut self, stmt: &'a StmtAST, fsa: FSA<'b>) -> Option<FSA<'b>> {
@@ -80,8 +84,8 @@ impl<'a> FIA<'a> {
             StmtAST::Assign { var, expr, .. } => Some(self.interp_assign(*var, expr, fsa)),
             StmtAST::Store { pointer, expr, .. } => Some(self.interp_store(pointer, expr, fsa)),
             StmtAST::Call {
-                vars, callee, args, ..
-            } => Some(self.interp_call(vars, *callee, args, fsa)),
+                vars, callee, args, label
+            } => Some(self.interp_call(vars, *callee, args, *label, fsa)),
             StmtAST::IfElse {
                 cond,
                 then_body,
@@ -131,16 +135,18 @@ impl<'a> FIA<'a> {
         vars: &'a Vec<Symbol>,
         callee: Symbol,
         args: &'a Vec<ExprAST>,
+        label: LabelId,
         mut fsa: FSA<'b>,
     ) -> FSA<'b> {
         let args: Vec<_> = args.iter().map(|arg| self.interp_expr(arg, &fsa)).collect();
         let callers = self.callgraph.callers.entry(callee).or_default();
-        callers.insert(fsa.block, args.clone());
+        callers.insert(label);
 
         let outputs = if callers.len() < 2 {
             self.callgraph.param_nodes.insert(callee, args.clone());
-            fsa.block = self.ssa.add_block(Block::Call(fsa.block, callee, args.clone()));
-            self.interp_func(&self.ast[&callee], args)
+            let (outputs, block) = self.interp_func_naked(&self.ast[&callee], args, fsa.block);
+            fsa.block = block;
+            outputs
         } else {
             let param_nodes: Vec<_> = zip(&args, &self.callgraph.param_nodes[&callee])
                 .enumerate()
@@ -160,6 +166,7 @@ impl<'a> FIA<'a> {
             if old_param_nodes.as_ref() != Some(&param_nodes) {
                 self.interp_func(&self.ast[&callee], param_nodes);
             }
+
             fsa.block = self.ssa.add_block(Block::Call(fsa.block, callee, args));
             (0..vars.len())
                 .map(|idx| {
@@ -168,6 +175,7 @@ impl<'a> FIA<'a> {
                 })
                 .collect()
         };
+
         for (var, output) in zip(vars, outputs.into_iter()) {
             fsa.vars.insert(*var, output);
         }
@@ -245,7 +253,7 @@ mod tests {
     #[test]
     fn translate1() {
         let program = r#"
-fn main() { x <- foo(5); y <- foo(3); return x + y; }
+fn main() { x <- foo(5); y <- foo(3); return x * y; }
 fn foo(x) return x + 1;
 "#;
         let mut counter = 0;
