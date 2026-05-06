@@ -30,7 +30,7 @@ struct FIA<'a> {
 #[derive(Debug, Default)]
 struct Callgraph {
     callers: FxHashMap<Symbol, FxHashMap<BlockId, Vec<Id>>>,
-    outputs: FxHashMap<Symbol, Vec<Id>>,
+    param_nodes: FxHashMap<Symbol, Vec<Id>>,
 }
 
 // Flow sensitive abstraction (mapping from program variable to e-class ID).
@@ -134,8 +134,40 @@ impl<'a> FIA<'a> {
         mut fsa: FSA<'b>,
     ) -> FSA<'b> {
         let args: Vec<_> = args.iter().map(|arg| self.interp_expr(arg, &fsa)).collect();
-        let outputs = self.interp_func(&self.ast[&callee], args.clone());
-        fsa.block = self.ssa.add_block(Block::Call(fsa.block, callee, args));
+        let callers = self.callgraph.callers.entry(callee).or_default();
+        callers.insert(fsa.block, args.clone());
+
+        let outputs = if callers.len() < 2 {
+            self.callgraph.param_nodes.insert(callee, args.clone());
+            fsa.block = self.ssa.add_block(Block::Call(fsa.block, callee, args.clone()));
+            self.interp_func(&self.ast[&callee], args)
+        } else {
+            let param_nodes: Vec<_> = zip(&args, &self.callgraph.param_nodes[&callee])
+                .enumerate()
+                .map(|(idx, (new_arg, old_arg))| {
+                    if *new_arg == *old_arg {
+                        *new_arg
+                    } else {
+                        let param = self.ssa.intern_param(callee, idx);
+                        self.ssa.add_data(Dataflow::Param(param))
+                    }
+                })
+                .collect();
+            let old_param_nodes = self
+                .callgraph
+                .param_nodes
+                .insert(callee, param_nodes.clone());
+            if old_param_nodes.as_ref() != Some(&param_nodes) {
+                self.interp_func(&self.ast[&callee], param_nodes);
+            }
+            fsa.block = self.ssa.add_block(Block::Call(fsa.block, callee, args));
+            (0..vars.len())
+                .map(|idx| {
+                    let call = self.ssa.intern_call(fsa.block, idx);
+                    self.ssa.add_data(Dataflow::Call(call))
+                })
+                .collect()
+        };
         for (var, output) in zip(vars, outputs.into_iter()) {
             fsa.vars.insert(*var, output);
         }
@@ -215,6 +247,18 @@ mod tests {
         let program = r#"
 fn main() { x <- foo(5); y <- foo(3); return x + y; }
 fn foo(x) return x + 1;
+"#;
+        let mut counter = 0;
+        let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
+        let ssa = create_ssa(&parsed);
+        panic!("{}", ssa);
+    }
+
+    #[test]
+    fn translate2() {
+        let program = r#"
+fn main() { x <- foo(7); return x; }
+fn foo(x) { x <- foo(x + 1); return x; }
 "#;
         let mut counter = 0;
         let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
