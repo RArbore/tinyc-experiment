@@ -6,7 +6,7 @@ use egg::{Id, Symbol};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::imp::ast::{ExprAST, FuncAST, LabelId, StmtAST};
-use crate::ssa::{Block, BlockId, Dataflow, SSAProgram};
+use crate::ssa::{Block, BlockId, Dataflow, SSAProgram, UnaryOp};
 
 pub fn create_ssa(ast: &FxHashMap<Symbol, FuncAST>) -> SSAProgram {
     let mut state = FIA {
@@ -214,9 +214,57 @@ impl<'a> FIA<'a> {
         cond: &'a ExprAST,
         then_body: &'a StmtAST,
         else_body: &'a StmtAST,
-        fsa: FSA<'b>,
+        mut fsa: FSA<'b>,
     ) -> Option<FSA<'b>> {
-        todo!()
+        let then_cond = self.interp_expr(cond, &fsa);
+        let else_cond = self.ssa.add_data(Dataflow::Unary(UnaryOp::Not, then_cond));
+        let then_always_false = self.is_always_false(then_cond);
+        let else_always_false = self.is_always_false(else_cond);
+
+        let mut then_fsa = None;
+        if !then_always_false {
+            let then_block = if else_always_false {
+                fsa.block
+            } else {
+                self.ssa.add_block(Block::Child(fsa.block, then_cond))
+            };
+            let mut ctx = fsa.clone();
+            ctx.block = then_block;
+            then_fsa = self.interp_stmt(then_body, ctx);
+        }
+
+        let mut else_fsa = None;
+        if !else_always_false {
+            let else_block = if then_always_false {
+                fsa.block
+            } else {
+                self.ssa.add_block(Block::Child(fsa.block, else_cond))
+            };
+            let mut ctx = fsa.clone();
+            ctx.block = else_block;
+            else_fsa = self.interp_stmt(else_body, ctx);
+        }
+
+        match (then_fsa, else_fsa) {
+            (Some(then_fsa), Some(else_fsa)) => {
+                let merge = self
+                    .ssa
+                    .add_block(Block::Merge(then_fsa.block, else_fsa.block));
+                for (var, then_value) in &then_fsa.vars {
+                    if let Some(else_value) = else_fsa.vars.get(var) {
+                        let value = if then_value == else_value {
+                            *then_value
+                        } else {
+                            let knot = self.ssa.intern_knot(merge, *var);
+                            self.ssa.add_data(Dataflow::Knot(knot))
+                        };
+                        fsa.vars.insert(*var, value);
+                    }
+                }
+                Some(fsa)
+            }
+            (fsa, None) | (None, fsa) => fsa,
+        }
     }
 
     fn interp_while<'b>(
@@ -255,21 +303,10 @@ impl<'a> FIA<'a> {
             }
         }
     }
-}
 
-fn are_all_same<D, I>(mut iter: I) -> Option<D>
-where
-    D: Eq,
-    I: Iterator<Item = D>,
-{
-    let mut same = iter.next();
-    for data in iter {
-        if same != Some(data) {
-            same = None;
-            break;
-        }
+    fn is_always_false(&self, value: Id) -> bool {
+        self.ssa.is_always_false(value)
     }
-    same
 }
 
 #[cfg(test)]
@@ -294,6 +331,18 @@ fn foo(x) return x + 1;
         let program = r#"
 fn main() { x <- foo(7); return x; }
 fn foo(x) { x <- foo(x + 1); return x; }
+"#;
+        let mut counter = 0;
+        let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
+        let ssa = create_ssa(&parsed);
+        panic!("{}", ssa);
+    }
+
+    #[test]
+    fn translate3() {
+        let program = r#"
+fn main() { if 0 { x <- foo(24); } else { x = 42; } return x; }
+fn foo(x) { return x; }
 "#;
         let mut counter = 0;
         let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();

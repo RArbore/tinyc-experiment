@@ -81,6 +81,10 @@ impl SSAProgram {
         self.entries.insert(function, block);
     }
 
+    pub fn is_always_false(&self, value: Id) -> bool {
+        self.dfg[value].nodes.contains(&Dataflow::Constant(0))
+    }
+
     pub fn intern_param(&mut self, function: Symbol, idx: usize) -> ParamId {
         if let Some(id) = self.param_map.get(&(function, idx)) {
             *id
