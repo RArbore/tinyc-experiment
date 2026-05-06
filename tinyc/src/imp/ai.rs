@@ -1,10 +1,11 @@
 use core::cell::RefCell;
 use core::iter::zip;
+use std::collections::VecDeque;
 
 use egg::{Id, Symbol};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::imp::ast::{ExprAST, FuncAST, StmtAST, LabelId};
+use crate::imp::ast::{ExprAST, FuncAST, LabelId, StmtAST};
 use crate::ssa::{Block, BlockId, Dataflow, SSAProgram};
 
 pub fn create_ssa(ast: &FxHashMap<Symbol, FuncAST>) -> SSAProgram {
@@ -12,9 +13,17 @@ pub fn create_ssa(ast: &FxHashMap<Symbol, FuncAST>) -> SSAProgram {
         ast,
         ssa: Default::default(),
         callgraph: Default::default(),
+        callers_to_revisit: Default::default(),
     };
     if let Some(main) = ast.get(&Symbol::from("main")) {
+        state
+            .callgraph
+            .param_nodes
+            .insert(Symbol::from("main"), vec![]);
         state.interp_func(main, vec![]);
+        while let Some(caller) = state.callers_to_revisit.pop_front() {
+            state.interp_func(&ast[&caller], state.callgraph.param_nodes[&caller].clone());
+        }
     }
     state.ssa
 }
@@ -25,11 +34,12 @@ struct FIA<'a> {
     ast: &'a FxHashMap<Symbol, FuncAST>,
     ssa: SSAProgram,
     callgraph: Callgraph,
+    callers_to_revisit: VecDeque<Symbol>,
 }
 
 #[derive(Debug, Default)]
 struct Callgraph {
-    callers: FxHashMap<Symbol, FxHashSet<LabelId>>,
+    callers: FxHashMap<Symbol, FxHashSet<(Symbol, LabelId)>>,
     param_nodes: FxHashMap<Symbol, Vec<Id>>,
 }
 
@@ -37,6 +47,7 @@ struct Callgraph {
 #[derive(Debug, Clone)]
 struct FSA<'a> {
     vars: FxHashMap<Symbol, Id>,
+    func: Symbol,
     block: BlockId,
     returned: &'a RefCell<FxHashSet<(BlockId, Vec<Id>)>>,
 }
@@ -45,18 +56,24 @@ impl<'a> FIA<'a> {
     fn interp_func(&mut self, func: &'a FuncAST, args: Vec<Id>) -> Vec<Id> {
         let entry = self.ssa.add_block(Block::Entry);
         self.ssa.add_entry(func.name, entry);
-        let (values, block) = self.interp_func_naked(func, args, entry);
-        self.ssa
-            .add_block(Block::Return(block, values.clone()));
+        let (values, block) = self.interp_func_naked(func, args, func.name, entry);
+        self.ssa.add_block(Block::Return(block, values.clone()));
         values
     }
 
-    fn interp_func_naked(&mut self, func: &'a FuncAST, args: Vec<Id>, block: BlockId) -> (Vec<Id>, BlockId) {
+    fn interp_func_naked(
+        &mut self,
+        func: &'a FuncAST,
+        args: Vec<Id>,
+        func_name: Symbol,
+        block: BlockId,
+    ) -> (Vec<Id>, BlockId) {
         let returned = Default::default();
         let fsa = FSA {
             vars: zip(func.params.iter(), args)
                 .map(|(name, id)| (*name, id))
                 .collect(),
+            func: func_name,
             block,
             returned: &returned,
         };
@@ -84,7 +101,10 @@ impl<'a> FIA<'a> {
             StmtAST::Assign { var, expr, .. } => Some(self.interp_assign(*var, expr, fsa)),
             StmtAST::Store { pointer, expr, .. } => Some(self.interp_store(pointer, expr, fsa)),
             StmtAST::Call {
-                vars, callee, args, label
+                vars,
+                callee,
+                args,
+                label,
             } => Some(self.interp_call(vars, *callee, args, *label, fsa)),
             StmtAST::IfElse {
                 cond,
@@ -140,11 +160,18 @@ impl<'a> FIA<'a> {
     ) -> FSA<'b> {
         let args: Vec<_> = args.iter().map(|arg| self.interp_expr(arg, &fsa)).collect();
         let callers = self.callgraph.callers.entry(callee).or_default();
-        callers.insert(label);
+        let old_num_callers = callers.len();
+        callers.insert((fsa.func, label));
+        let new_num_callers = callers.len();
+        if old_num_callers != new_num_callers {
+            self.callers_to_revisit
+                .extend(callers.iter().map(|(caller, _)| *caller));
+        }
 
-        let outputs = if callers.len() < 2 {
+        let outputs = if new_num_callers < 2 {
             self.callgraph.param_nodes.insert(callee, args.clone());
-            let (outputs, block) = self.interp_func_naked(&self.ast[&callee], args, fsa.block);
+            let (outputs, block) =
+                self.interp_func_naked(&self.ast[&callee], args, fsa.func, fsa.block);
             fsa.block = block;
             outputs
         } else {
