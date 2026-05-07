@@ -20,6 +20,7 @@ pub fn create_ssa(ast: &FxHashMap<Symbol, FuncAST>) -> SSAProgram {
             .insert(Symbol::from("main"), vec![]);
         state.interp_func(main, vec![]);
     }
+    state.ssa.canon_cfg();
     state.ssa
 }
 
@@ -47,12 +48,12 @@ struct FSA<'a> {
 }
 
 impl<'a> FIA<'a> {
-    fn interp_func(&mut self, func: &'a FuncAST, args: Vec<Id>) -> Vec<Id> {
+    fn interp_func(&mut self, func: &'a FuncAST, args: Vec<Id>) -> Option<(Vec<Id>, BlockId)> {
         let entry = self.ssa.add_block(Block::Entry);
         self.ssa.add_entry(func.name, entry);
-        let (values, block) = self.interp_func_naked(func, args, func.name, entry);
-        self.ssa.add_block(Block::Return(block, values.clone()));
-        values
+        let (values, block) = self.interp_func_naked(func, args, func.name, entry)?;
+        let return_block = self.ssa.add_block(Block::Return(block, values.clone()));
+        Some((values, return_block))
     }
 
     fn interp_func_naked(
@@ -61,7 +62,7 @@ impl<'a> FIA<'a> {
         args: Vec<Id>,
         func_name: Symbol,
         block: BlockId,
-    ) -> (Vec<Id>, BlockId) {
+    ) -> Option<(Vec<Id>, BlockId)> {
         let returned = Default::default();
         let fsa = FSA {
             vars: zip(func.params.iter(), args)
@@ -74,7 +75,7 @@ impl<'a> FIA<'a> {
         assert!(self.interp_stmt(&func.body, fsa).is_none());
 
         let mut returned = returned.into_inner().into_iter();
-        let (mut acc_block, mut acc_values) = returned.next().unwrap();
+        let (mut acc_block, mut acc_values) = returned.next()?;
         for (new_block, new_values) in returned {
             acc_block = self.ssa.add_block(Block::Merge(acc_block, new_block));
             assert_eq!(acc_values.len(), new_values.len());
@@ -86,7 +87,7 @@ impl<'a> FIA<'a> {
                 }
             }
         }
-        (acc_values, acc_block)
+        Some((acc_values, acc_block))
     }
 
     fn interp_stmt<'b>(&mut self, stmt: &'a StmtAST, fsa: FSA<'b>) -> Option<FSA<'b>> {
@@ -99,7 +100,7 @@ impl<'a> FIA<'a> {
                 callee,
                 args,
                 label,
-            } => Some(self.interp_call(vars, *callee, args, *label, fsa)),
+            } => self.interp_call(vars, *callee, args, *label, fsa),
             StmtAST::IfElse {
                 cond,
                 then_body,
@@ -151,7 +152,7 @@ impl<'a> FIA<'a> {
         args: &'a Vec<ExprAST>,
         label: LabelId,
         mut fsa: FSA<'b>,
-    ) -> FSA<'b> {
+    ) -> Option<FSA<'b>> {
         let args: Vec<_> = args.iter().map(|arg| self.interp_expr(arg, &fsa)).collect();
         let callers = self.callgraph.callers.entry(callee).or_default();
         callers.insert((fsa.func, label));
@@ -159,7 +160,7 @@ impl<'a> FIA<'a> {
         let outputs = if callers.len() < 2 {
             self.callgraph.param_nodes.insert(callee, args.clone());
             let (outputs, block) =
-                self.interp_func_naked(&self.ast[&callee], args, fsa.func, fsa.block);
+                self.interp_func_naked(&self.ast[&callee], args, fsa.func, fsa.block)?;
             fsa.block = block;
             outputs
         } else {
@@ -194,7 +195,7 @@ impl<'a> FIA<'a> {
         for (var, output) in zip(vars, outputs.into_iter()) {
             fsa.vars.insert(*var, output);
         }
-        fsa
+        Some(fsa)
     }
 
     fn interp_ifelse<'b>(

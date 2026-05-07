@@ -1,6 +1,8 @@
 use core::cmp::Ordering;
 
-use crate::ssa::{BinaryOp, UnaryOp};
+use egg::{Analysis, DidMerge, EGraph, Id};
+
+use crate::ssa::{BinaryOp, Dataflow, UnaryOp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Bound {
@@ -395,13 +397,49 @@ impl Interval {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct IntervalAnalysis;
+
+impl Analysis<Dataflow> for IntervalAnalysis {
+    type Data = Interval;
+
+    fn make(egraph: &mut EGraph<Dataflow, Self>, enode: &Dataflow, _id: Id) -> Interval {
+        let c = |i: Id| egraph[i].data;
+        use Dataflow::*;
+        match enode {
+            Constant(cons) => Interval::from_constant(*cons),
+            Param(_) => Interval::top(),
+            Knot(_) => Interval::top(),
+            Phi(_, inputs) => c(inputs[0]).join(&c(inputs[1])),
+            Unary(op, id) => c(*id).forward_unary(*op),
+            Binary(op, inputs) => c(inputs[0]).forward_binary(&c(inputs[1]), *op),
+            Load(_, _) => Interval::top(),
+            Call(_) => Interval::top(),
+        }
+    }
+
+    fn merge(&mut self, a: &mut Interval, b: Interval) -> DidMerge {
+        let m = a.meet(&b);
+        let d = DidMerge(*a != m, b != m);
+        *a = m;
+        d
+    }
+
+    fn modify(egraph: &mut EGraph<Dataflow, Self>, id: Id) {
+        if let Some(cons) = egraph[id].data.try_constant() {
+            let cons = egraph.add(Dataflow::Constant(cons));
+            egraph.union(id, cons);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rand::prelude::*;
     use rand::rngs::Xoshiro128PlusPlus;
 
     use super::*;
-    
+
     fn sample_interval<R: Rng + ?Sized>(rng: &mut R) -> Interval {
         use Bound::*;
         let low_case = rng.random::<u32>() % 100;

@@ -5,6 +5,8 @@ use derive_more::FromStr;
 use egg::{EGraph, Id, Symbol, define_language};
 use rustc_hash::FxHashMap;
 
+use crate::analysis::interval::IntervalAnalysis;
+
 #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash, FromStr)]
 pub enum UnaryOp {
     Neg,
@@ -54,7 +56,7 @@ pub enum Block {
 
 #[derive(Debug, Default)]
 pub struct SSAProgram {
-    dfg: EGraph<Dataflow, ()>,
+    dfg: EGraph<Dataflow, IntervalAnalysis>,
     cfg: Vec<Block>,
     entries: FxHashMap<Symbol, BlockId>,
 
@@ -88,6 +90,22 @@ impl SSAProgram {
     pub fn is_always_false(&mut self, value: Id) -> bool {
         self.dfg.rebuild();
         self.dfg[value].nodes.contains(&Dataflow::Constant(0))
+    }
+
+    pub fn canon_cfg(&mut self) {
+        for block in &mut self.cfg {
+            match block {
+                Block::Entry | Block::Merge(_, _) => {}
+                Block::Child(_, cond) => *cond = self.dfg.find(*cond),
+                Block::Store(_, ptr, value) => {
+                    *ptr = self.dfg.find(*ptr);
+                    *value = self.dfg.find(*value);
+                }
+                Block::Call(_, _, ids) | Block::Return(_, ids) => {
+                    ids.iter_mut().for_each(|id| *id = self.dfg.find(*id))
+                }
+            }
+        }
     }
 
     pub fn intern_param(&mut self, function: Symbol, idx: usize) -> ParamId {
