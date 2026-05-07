@@ -339,7 +339,7 @@ impl<'a> FIA<'a> {
         }
     }
 
-    fn is_always_false(&self, value: Id) -> bool {
+    fn is_always_false(&mut self, value: Id) -> bool {
         self.ssa.is_always_false(value)
     }
 }
@@ -357,8 +357,7 @@ fn foo(x) return x + 1;
 "#;
         let mut counter = 0;
         let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
-        let ssa = create_ssa(&parsed);
-        panic!("{}", ssa);
+        let _ssa = create_ssa(&parsed);
     }
 
     #[test]
@@ -369,8 +368,7 @@ fn foo(x) { x <- foo(x + 1); return x; }
 "#;
         let mut counter = 0;
         let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
-        let ssa = create_ssa(&parsed);
-        panic!("{}", ssa);
+        let _ssa = create_ssa(&parsed);
     }
 
     #[test]
@@ -381,8 +379,7 @@ fn foo(x) { return x; }
 "#;
         let mut counter = 0;
         let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
-        let ssa = create_ssa(&parsed);
-        panic!("{}", ssa);
+        let _ssa = create_ssa(&parsed);
     }
 
     #[test]
@@ -394,7 +391,6 @@ fn baz() { return 42; }
 "#;
         let mut counter = 0;
         let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
-        let ssa = create_ssa(&parsed);
-        panic!("{}", ssa);
+        let _ssa = create_ssa(&parsed);
     }
 }

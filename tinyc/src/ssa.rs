@@ -85,7 +85,8 @@ impl SSAProgram {
         self.entries.insert(function, block);
     }
 
-    pub fn is_always_false(&self, value: Id) -> bool {
+    pub fn is_always_false(&mut self, value: Id) -> bool {
+        self.dfg.rebuild();
         self.dfg[value].nodes.contains(&Dataflow::Constant(0))
     }
 
