@@ -1,6 +1,5 @@
 use core::cell::RefCell;
 use core::iter::zip;
-use std::collections::VecDeque;
 
 use egg::{Id, Symbol};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -13,7 +12,6 @@ pub fn create_ssa(ast: &FxHashMap<Symbol, FuncAST>) -> SSAProgram {
         ast,
         ssa: Default::default(),
         callgraph: Default::default(),
-        callers_to_revisit: Default::default(),
     };
     if let Some(main) = ast.get(&Symbol::from("main")) {
         state
@@ -21,9 +19,6 @@ pub fn create_ssa(ast: &FxHashMap<Symbol, FuncAST>) -> SSAProgram {
             .param_nodes
             .insert(Symbol::from("main"), vec![]);
         state.interp_func(main, vec![]);
-        while let Some(caller) = state.callers_to_revisit.pop_front() {
-            state.interp_func(&ast[&caller], state.callgraph.param_nodes[&caller].clone());
-        }
     }
     state.ssa
 }
@@ -34,7 +29,6 @@ struct FIA<'a> {
     ast: &'a FxHashMap<Symbol, FuncAST>,
     ssa: SSAProgram,
     callgraph: Callgraph,
-    callers_to_revisit: VecDeque<Symbol>,
 }
 
 #[derive(Debug, Default)]
@@ -160,15 +154,9 @@ impl<'a> FIA<'a> {
     ) -> FSA<'b> {
         let args: Vec<_> = args.iter().map(|arg| self.interp_expr(arg, &fsa)).collect();
         let callers = self.callgraph.callers.entry(callee).or_default();
-        let old_num_callers = callers.len();
         callers.insert((fsa.func, label));
-        let new_num_callers = callers.len();
-        if old_num_callers != new_num_callers {
-            self.callers_to_revisit
-                .extend(callers.iter().map(|(caller, _)| *caller));
-        }
 
-        let outputs = if new_num_callers < 2 {
+        let outputs = if callers.len() < 2 {
             self.callgraph.param_nodes.insert(callee, args.clone());
             let (outputs, block) =
                 self.interp_func_naked(&self.ast[&callee], args, fsa.func, fsa.block);
@@ -271,9 +259,56 @@ impl<'a> FIA<'a> {
         &mut self,
         cond: &'a ExprAST,
         body: &'a StmtAST,
-        fsa: FSA<'b>,
+        mut fsa: FSA<'b>,
     ) -> Option<FSA<'b>> {
-        todo!()
+        let mut then_cond = self.interp_expr(cond, &fsa);
+        if self.is_always_false(then_cond) {
+            return Some(fsa);
+        }
+
+        let mut header = fsa.block;
+        let mut loop_fsa = fsa.clone();
+        loop_fsa.block = self.ssa.add_block(Block::Child(header, then_cond));
+
+        if let Some(mut loop_fsa) = self.interp_stmt(body, loop_fsa) {
+            header = self.ssa.add_block(Block::Entry);
+            let mut old_header_vars = FxHashMap::default();
+            loop {
+                let mut new_vars = fsa.vars.clone();
+                for (var, init_value) in &fsa.vars {
+                    if let Some(loop_value) = loop_fsa.vars.get(var) {
+                        let value = if init_value == loop_value {
+                            *init_value
+                        } else {
+                            let knot = self.ssa.intern_knot(header, *var);
+                            self.ssa.add_data(Dataflow::Knot(knot))
+                        };
+                        new_vars.insert(*var, value);
+                    }
+                }
+                if new_vars == old_header_vars {
+                    fsa.vars = new_vars;
+                    self.ssa
+                        .set_block(Block::Merge(fsa.block, loop_fsa.block), header);
+                    break;
+                }
+                old_header_vars = new_vars.clone();
+
+                let mut new_loop_fsa = fsa.clone();
+                new_loop_fsa.vars = new_vars;
+                then_cond = self.interp_expr(cond, &new_loop_fsa);
+                new_loop_fsa.block = self.ssa.add_block(Block::Child(header, then_cond));
+                loop_fsa = self.interp_stmt(body, new_loop_fsa).unwrap();
+            }
+        }
+
+        let else_cond = self.ssa.add_data(Dataflow::Unary(UnaryOp::Not, then_cond));
+        if self.is_always_false(else_cond) {
+            None
+        } else {
+            fsa.block = self.ssa.add_block(Block::Child(header, else_cond));
+            Some(fsa)
+        }
     }
 
     fn interp_return<'b>(&mut self, exprs: &'a Vec<ExprAST>, fsa: FSA<'b>) {
@@ -343,6 +378,19 @@ fn foo(x) { x <- foo(x + 1); return x; }
         let program = r#"
 fn main() { if 0 { x <- foo(24); } else { x = 42; } return x; }
 fn foo(x) { return x; }
+"#;
+        let mut counter = 0;
+        let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
+        let ssa = create_ssa(&parsed);
+        panic!("{}", ssa);
+    }
+
+    #[test]
+    fn translate4() {
+        let program = r#"
+fn main() { x = 1; while x < 100 { x = x + (1 * 5); } foo(); return x; }
+fn foo() { x = 5; y = 8; while y < 100 { x = x + 1; } baz(); return y; }
+fn baz() { return 42; }
 "#;
         let mut counter = 0;
         let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();

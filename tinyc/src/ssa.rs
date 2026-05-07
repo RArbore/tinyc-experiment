@@ -77,6 +77,10 @@ impl SSAProgram {
         id
     }
 
+    pub fn set_block(&mut self, block: Block, id: BlockId) {
+        self.cfg[id] = block;
+    }
+
     pub fn add_entry(&mut self, function: Symbol, block: BlockId) {
         self.entries.insert(function, block);
     }
