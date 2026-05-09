@@ -13,9 +13,18 @@ pub fn create_ssa(ast: &FxHashMap<Symbol, FuncAST>) -> SSAProgram {
         ast,
         ssa: Default::default(),
         callgraph: Default::default(),
+        callers_to_revisit: Default::default(),
     };
-    if let Some(main) = ast.get(&Symbol::from("main")) {
-        state.interp_func(main, vec![]);
+    state
+        .callgraph
+        .input_values
+        .insert(Symbol::from("main"), vec![]);
+    state.callers_to_revisit.push(Symbol::from("main"));
+    while let Some(func) = state.callers_to_revisit.pop() {
+        state.interp_func(
+            ast.get(&func).unwrap(),
+            state.callgraph.input_values[&func].clone(),
+        );
     }
     state.ssa.canon_cfg();
     state.ssa
@@ -27,11 +36,13 @@ struct FIA<'a> {
     ast: &'a FxHashMap<Symbol, FuncAST>,
     ssa: SSAProgram,
     callgraph: Callgraph,
+    callers_to_revisit: Vec<Symbol>,
 }
 
 #[derive(Debug, Default)]
 struct Callgraph {
-    callers: FxHashMap<Symbol, FxHashMap<LabelId, Vec<Id>>>,
+    callers: FxHashMap<Symbol, FxHashSet<Symbol>>,
+    callsites: FxHashMap<Symbol, FxHashMap<LabelId, Vec<Id>>>,
     input_values: FxHashMap<Symbol, Vec<Id>>,
     output_analyses: FxHashMap<Symbol, Vec<Interval>>,
 }
@@ -51,6 +62,28 @@ impl<'a> FIA<'a> {
         self.ssa.add_entry(func.name, entry);
         let (values, block) = self.interp_func_naked(func, args, func.name, entry)?;
         let return_block = self.ssa.add_block(Block::Return(block, values.clone()));
+
+        let output_analyses = self
+            .callgraph
+            .output_analyses
+            .entry(func.name)
+            .or_insert_with(|| {
+                (0..values.len())
+                    .map(|idx| self.ssa.analysis(values[idx]))
+                    .collect()
+            });
+        let mut output_changed = false;
+        for idx in 0..values.len() {
+            let widened = output_analyses[idx].widen(&self.ssa.analysis(values[idx]));
+            if widened != output_analyses[idx] {
+                output_changed = true;
+                output_analyses[idx] = widened;
+            }
+        }
+        if output_changed && let Some(callers) = self.callgraph.callers.get(&func.name) {
+            self.callers_to_revisit.extend(callers.iter().copied());
+        }
+
         Some((values, return_block))
     }
 
@@ -153,10 +186,15 @@ impl<'a> FIA<'a> {
         mut fsa: FSA<'b>,
     ) -> Option<FSA<'b>> {
         let args: Vec<_> = args.iter().map(|arg| self.interp_expr(arg, &fsa)).collect();
-        let callers = self.callgraph.callers.entry(callee).or_default();
-        let old_args = callers.insert(label, args.clone());
+        self.callgraph
+            .callers
+            .entry(callee)
+            .or_default()
+            .insert(fsa.func);
+        let callsites = self.callgraph.callsites.entry(callee).or_default();
+        let old_args = callsites.insert(label, args.clone());
 
-        let outputs = if callers.len() < 2 {
+        let outputs = if callsites.len() < 2 {
             let (outputs, block) =
                 self.interp_func_naked(&self.ast[&callee], args, fsa.func, fsa.block)?;
             fsa.block = block;
@@ -164,19 +202,19 @@ impl<'a> FIA<'a> {
         } else {
             let mut joined_analyses = vec![None; args.len()];
             for idx in 0..args.len() {
-                for (_, other_args) in callers.iter() {
+                for (_, other_args) in callsites.iter() {
                     if args[idx] != other_args[idx] {
+                        let widened = old_args
+                            .as_ref()
+                            .map(|old_args| {
+                                self.ssa
+                                    .analysis(old_args[idx])
+                                    .widen(&self.ssa.analysis(args[idx]))
+                            })
+                            .unwrap_or(self.ssa.analysis(args[idx]));
                         joined_analyses[idx] = Some(
                             joined_analyses[idx]
-                                .unwrap_or_else(|| {
-                                    if let Some(old_args) = &old_args {
-                                        self.ssa
-                                            .analysis(old_args[idx])
-                                            .widen(&self.ssa.analysis(args[idx]))
-                                    } else {
-                                        self.ssa.analysis(args[idx])
-                                    }
-                                })
+                                .unwrap_or(widened)
                                 .join(&self.ssa.analysis(other_args[idx])),
                         );
                     }
@@ -192,6 +230,7 @@ impl<'a> FIA<'a> {
                         .unwrap_or(args[idx])
                 })
                 .collect();
+
             if self.callgraph.input_values.get(&callee) != Some(&joined_args) {
                 self.callgraph
                     .input_values
@@ -199,13 +238,17 @@ impl<'a> FIA<'a> {
                 self.interp_func(&self.ast[&callee], joined_args);
             }
 
-            fsa.block = self.ssa.add_block(Block::Call(fsa.block, callee, args));
-            (0..vars.len())
-                .map(|idx| {
-                    let call = self.ssa.intern_call(fsa.block, idx, Interval::top());
-                    self.ssa.add_data(Dataflow::Call(call))
-                })
-                .collect()
+            if let Some(output_analyses) = self.callgraph.output_analyses.get(&callee) {
+                fsa.block = self.ssa.add_block(Block::Call(fsa.block, callee, args));
+                (0..vars.len())
+                    .map(|idx| {
+                        let call = self.ssa.intern_call(fsa.block, idx, output_analyses[idx]);
+                        self.ssa.add_data(Dataflow::Call(call))
+                    })
+                    .collect()
+            } else {
+                return None;
+            }
         };
 
         for (var, output) in zip(vars, outputs.into_iter()) {
@@ -404,7 +447,7 @@ fn foo(x) { x <- foo(x + 1); return x; }
         let ssa = create_ssa(&parsed);
         assert_eq!(ssa.param_map.len(), 2);
         assert_eq!(ssa.knot_map.len(), 0);
-        assert_eq!(ssa.call_map.len(), 3);
+        assert_eq!(ssa.call_map.len(), 0);
     }
 
     #[test]
@@ -460,6 +503,6 @@ fn foo(x) { if x { x <- foo(x - 1); return x + 1; } else { return 0; } }
         let ssa = create_ssa(&parsed);
         assert_eq!(ssa.param_map.len(), 2);
         assert_eq!(ssa.knot_map.len(), 0);
-        assert_eq!(ssa.call_map.len(), 3);
+        assert_eq!(ssa.call_map.len(), 4);
     }
 }
