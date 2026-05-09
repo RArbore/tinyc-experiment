@@ -92,6 +92,11 @@ impl SSAProgram {
         self.dfg[value].nodes.contains(&Dataflow::Constant(0))
     }
 
+    pub fn analysis(&mut self, value: Id) -> Interval {
+        self.dfg.rebuild();
+        self.dfg[value].data
+    }
+
     pub fn canon_cfg(&mut self) {
         for block in &mut self.cfg {
             match block {
@@ -114,6 +119,7 @@ impl SSAProgram {
         } else {
             let id = self.param_map.len();
             self.param_map.insert((function, idx, analysis), id);
+            self.dfg.analysis.param_intervals.push(analysis);
             id
         }
     }
@@ -124,6 +130,7 @@ impl SSAProgram {
         } else {
             let id = self.knot_map.len();
             self.knot_map.insert((block, var, analysis), id);
+            self.dfg.analysis.knot_intervals.push(analysis);
             id
         }
     }
@@ -134,6 +141,7 @@ impl SSAProgram {
         } else {
             let id = self.call_map.len();
             self.call_map.insert((caller, idx, analysis), id);
+            self.dfg.analysis.call_intervals.push(analysis);
             id
         }
     }

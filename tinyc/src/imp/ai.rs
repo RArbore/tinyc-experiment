@@ -240,7 +240,11 @@ impl<'a> FIA<'a> {
                         let value = if then_value == else_value {
                             *then_value
                         } else {
-                            let knot = self.ssa.intern_knot(merge, *var, Interval::top());
+                            let analysis = self
+                                .ssa
+                                .analysis(*then_value)
+                                .join(&self.ssa.analysis(*else_value));
+                            let knot = self.ssa.intern_knot(merge, *var, analysis);
                             self.ssa.add_data(Dataflow::Knot(knot))
                         };
                         fsa.vars.insert(*var, value);
@@ -269,7 +273,8 @@ impl<'a> FIA<'a> {
 
         if let Some(mut loop_fsa) = self.interp_stmt(body, loop_fsa) {
             header = self.ssa.add_block(Block::Entry);
-            let mut old_header_vars = FxHashMap::default();
+            let mut old_header_values = FxHashMap::default();
+            let mut old_loop_analyses: FxHashMap<Symbol, Interval> = FxHashMap::default();
             loop {
                 let mut new_vars = fsa.vars.clone();
                 for (var, init_value) in &fsa.vars {
@@ -277,19 +282,27 @@ impl<'a> FIA<'a> {
                         let value = if init_value == loop_value {
                             *init_value
                         } else {
-                            let knot = self.ssa.intern_knot(header, *var, Interval::top());
+                            let widened = if let Some(old_loop) = old_loop_analyses.get(var) {
+                                old_loop.widen(&self.ssa.analysis(*loop_value))
+                            } else {
+                                self.ssa.analysis(*loop_value)
+                            };
+                            let analysis = self.ssa.analysis(*init_value).join(&widened);
+                            let knot = self.ssa.intern_knot(header, *var, analysis);
                             self.ssa.add_data(Dataflow::Knot(knot))
                         };
                         new_vars.insert(*var, value);
+                        old_loop_analyses.insert(*var, self.ssa.analysis(value));
                     }
                 }
-                if new_vars == old_header_vars {
+
+                if new_vars == old_header_values {
                     fsa.vars = new_vars;
                     self.ssa
                         .set_block(Block::Merge(fsa.block, loop_fsa.block), header);
                     break;
                 }
-                old_header_vars = new_vars.clone();
+                old_header_values = new_vars.clone();
 
                 let mut new_loop_fsa = fsa.clone();
                 new_loop_fsa.vars = new_vars;
@@ -391,6 +404,20 @@ fn foo(x) { return x; }
     #[test]
     fn translate4() {
         let program = r#"
+fn main() { x = 1; while x < 100 { x = x + (1 * 5); } return x; }
+"#;
+        let mut counter = 0;
+        let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
+        let ssa = create_ssa(&parsed);
+        assert_eq!(ssa.param_map.len(), 0);
+        assert_eq!(ssa.knot_map.len(), 2);
+        assert_eq!(ssa.call_map.len(), 0);
+        panic!("{}", ssa);
+    }
+
+    #[test]
+    fn translate5() {
+        let program = r#"
 fn main() { x = 1; while x < 100 { x = x + (1 * 5); } foo(); return x; }
 fn foo() { x = 5; y = 8; while y < 100 { x = x + 1; } baz(); return y; }
 fn baz() { return 42; }
@@ -399,7 +426,7 @@ fn baz() { return 42; }
         let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
         let ssa = create_ssa(&parsed);
         assert_eq!(ssa.param_map.len(), 0);
-        assert_eq!(ssa.knot_map.len(), 2);
+        assert_eq!(ssa.knot_map.len(), 4);
         assert_eq!(ssa.call_map.len(), 0);
     }
 }

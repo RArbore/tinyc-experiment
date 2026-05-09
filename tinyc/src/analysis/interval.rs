@@ -415,7 +415,11 @@ impl Display for Interval {
 }
 
 #[derive(Debug, Default)]
-pub struct IntervalAnalysis;
+pub struct IntervalAnalysis {
+    pub param_intervals: Vec<Interval>,
+    pub knot_intervals: Vec<Interval>,
+    pub call_intervals: Vec<Interval>,
+}
 
 impl Analysis<Dataflow> for IntervalAnalysis {
     type Data = Interval;
@@ -425,13 +429,13 @@ impl Analysis<Dataflow> for IntervalAnalysis {
         use Dataflow::*;
         match enode {
             Constant(cons) => Interval::from_constant(*cons),
-            Param(_) => Interval::top(),
-            Knot(_) => Interval::top(),
+            Param(id) => egraph.analysis.param_intervals[*id],
+            Knot(id) => egraph.analysis.knot_intervals[*id],
             Phi(_, inputs) => c(inputs[0]).join(&c(inputs[1])),
             Unary(op, id) => c(*id).forward_unary(*op),
             Binary(op, inputs) => c(inputs[0]).forward_binary(&c(inputs[1]), *op),
             Load(_, _) => Interval::top(),
-            Call(_) => Interval::top(),
+            Call(id) => egraph.analysis.call_intervals[*id],
         }
     }
 
