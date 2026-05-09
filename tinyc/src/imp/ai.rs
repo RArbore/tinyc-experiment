@@ -32,7 +32,8 @@ struct FIA<'a> {
 #[derive(Debug, Default)]
 struct Callgraph {
     callers: FxHashMap<Symbol, FxHashMap<LabelId, Vec<Id>>>,
-    implementations: FxHashMap<Symbol, Vec<Id>>,
+    input_values: FxHashMap<Symbol, Vec<Id>>,
+    output_analyses: FxHashMap<Symbol, Vec<Interval>>,
 }
 
 // Flow sensitive abstraction (mapping from program variable to e-class ID).
@@ -153,7 +154,7 @@ impl<'a> FIA<'a> {
     ) -> Option<FSA<'b>> {
         let args: Vec<_> = args.iter().map(|arg| self.interp_expr(arg, &fsa)).collect();
         let callers = self.callgraph.callers.entry(callee).or_default();
-        callers.insert(label, args.clone());
+        let old_args = callers.insert(label, args.clone());
 
         let outputs = if callers.len() < 2 {
             let (outputs, block) =
@@ -161,21 +162,40 @@ impl<'a> FIA<'a> {
             fsa.block = block;
             outputs
         } else {
-            let mut joined_args = args.clone();
-            for idx in 0..joined_args.len() {
+            let mut joined_analyses = vec![None; args.len()];
+            for idx in 0..args.len() {
                 for (_, other_args) in callers.iter() {
-                    if joined_args[idx] != other_args[idx] {
-                        let param = self.ssa.intern_param(callee, idx, Interval::top());
-                        joined_args[idx] = self.ssa.add_data(Dataflow::Param(param));
-                        break;
+                    if args[idx] != other_args[idx] {
+                        joined_analyses[idx] = Some(
+                            joined_analyses[idx]
+                                .unwrap_or_else(|| {
+                                    if let Some(old_args) = &old_args {
+                                        self.ssa
+                                            .analysis(old_args[idx])
+                                            .widen(&self.ssa.analysis(args[idx]))
+                                    } else {
+                                        self.ssa.analysis(args[idx])
+                                    }
+                                })
+                                .join(&self.ssa.analysis(other_args[idx])),
+                        );
                     }
                 }
             }
-            let old_implementation = self
-                .callgraph
-                .implementations
-                .insert(callee, joined_args.clone());
-            if old_implementation.as_ref() != Some(&joined_args) {
+            let joined_args = (0..args.len())
+                .map(|idx| {
+                    joined_analyses[idx]
+                        .map(|analysis| {
+                            let param = self.ssa.intern_param(callee, idx, analysis);
+                            self.ssa.add_data(Dataflow::Param(param))
+                        })
+                        .unwrap_or(args[idx])
+                })
+                .collect();
+            if self.callgraph.input_values.get(&callee) != Some(&joined_args) {
+                self.callgraph
+                    .input_values
+                    .insert(callee, joined_args.clone());
                 self.interp_func(&self.ast[&callee], joined_args);
             }
 
@@ -382,9 +402,9 @@ fn foo(x) { x <- foo(x + 1); return x; }
         let mut counter = 0;
         let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
         let ssa = create_ssa(&parsed);
-        assert_eq!(ssa.param_map.len(), 1);
+        assert_eq!(ssa.param_map.len(), 2);
         assert_eq!(ssa.knot_map.len(), 0);
-        assert_eq!(ssa.call_map.len(), 2);
+        assert_eq!(ssa.call_map.len(), 3);
     }
 
     #[test]
@@ -438,8 +458,8 @@ fn foo(x) { if x { x <- foo(x - 1); return x + 1; } else { return 0; } }
         let mut counter = 0;
         let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
         let ssa = create_ssa(&parsed);
-        assert_eq!(ssa.param_map.len(), 1);
+        assert_eq!(ssa.param_map.len(), 2);
         assert_eq!(ssa.knot_map.len(), 0);
-        assert_eq!(ssa.call_map.len(), 2);
+        assert_eq!(ssa.call_map.len(), 3);
     }
 }
