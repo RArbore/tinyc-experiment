@@ -1,4 +1,5 @@
 use core::cmp::Ordering;
+use core::fmt::{Display, Formatter, Result};
 
 use egg::{Analysis, DidMerge, EGraph, Id};
 
@@ -144,6 +145,16 @@ impl Ord for Bound {
 impl PartialOrd for Bound {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+impl Display for Bound {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        match self {
+            Bound::MinusInfinity => write!(f, "-∞"),
+            Bound::Integer(cons) => write!(f, "{cons}"),
+            Bound::PlusInfinity => write!(f, "∞"),
+        }
     }
 }
 
@@ -394,6 +405,12 @@ impl Interval {
         } else {
             interval
         }
+    }
+}
+
+impl Display for Interval {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(f, "[{}, {}]", self.low, self.high)
     }
 }
 

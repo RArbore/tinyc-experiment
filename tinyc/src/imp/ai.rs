@@ -4,6 +4,7 @@ use core::iter::zip;
 use egg::{Id, Symbol};
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use crate::analysis::interval::Interval;
 use crate::imp::ast::{ExprAST, FuncAST, LabelId, StmtAST};
 use crate::ssa::{Block, BlockId, Dataflow, SSAProgram, UnaryOp};
 
@@ -170,7 +171,7 @@ impl<'a> FIA<'a> {
                     if *new_arg == *old_arg {
                         *new_arg
                     } else {
-                        let param = self.ssa.intern_param(callee, idx);
+                        let param = self.ssa.intern_param(callee, idx, Interval::top());
                         self.ssa.add_data(Dataflow::Param(param))
                     }
                 })
@@ -186,7 +187,7 @@ impl<'a> FIA<'a> {
             fsa.block = self.ssa.add_block(Block::Call(fsa.block, callee, args));
             (0..vars.len())
                 .map(|idx| {
-                    let call = self.ssa.intern_call(fsa.block, idx);
+                    let call = self.ssa.intern_call(fsa.block, idx, Interval::top());
                     self.ssa.add_data(Dataflow::Call(call))
                 })
                 .collect()
@@ -244,7 +245,7 @@ impl<'a> FIA<'a> {
                         let value = if then_value == else_value {
                             *then_value
                         } else {
-                            let knot = self.ssa.intern_knot(merge, *var);
+                            let knot = self.ssa.intern_knot(merge, *var, Interval::top());
                             self.ssa.add_data(Dataflow::Knot(knot))
                         };
                         fsa.vars.insert(*var, value);
@@ -281,7 +282,7 @@ impl<'a> FIA<'a> {
                         let value = if init_value == loop_value {
                             *init_value
                         } else {
-                            let knot = self.ssa.intern_knot(header, *var);
+                            let knot = self.ssa.intern_knot(header, *var, Interval::top());
                             self.ssa.add_data(Dataflow::Knot(knot))
                         };
                         new_vars.insert(*var, value);

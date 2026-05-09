@@ -5,7 +5,7 @@ use derive_more::FromStr;
 use egg::{EGraph, Id, Symbol, define_language};
 use rustc_hash::FxHashMap;
 
-use crate::analysis::interval::IntervalAnalysis;
+use crate::analysis::interval::{Interval, IntervalAnalysis};
 
 #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash, FromStr)]
 pub enum UnaryOp {
@@ -60,12 +60,12 @@ pub struct SSAProgram {
     cfg: Vec<Block>,
     entries: FxHashMap<Symbol, BlockId>,
 
-    // Intern pairs of function name and parameter index to ParamId.
-    param_map: FxHashMap<(Symbol, usize), ParamId>,
-    // Intern pairs of BlockId and variable name to KnotId.
-    knot_map: FxHashMap<(BlockId, Symbol), KnotId>,
-    // Intern tuples of BlockId (of a Call node) and return value index to CallId.
-    call_map: FxHashMap<(BlockId, usize), CallId>,
+    // Intern tuples of function name, parameter index, and analysis to ParamId.
+    param_map: FxHashMap<(Symbol, usize, Interval), ParamId>,
+    // Intern tuples of BlockId, variable name, and analysis to KnotId.
+    knot_map: FxHashMap<(BlockId, Symbol, Interval), KnotId>,
+    // Intern tuples of BlockId (of a Call node), return value index, and analysis to CallId.
+    call_map: FxHashMap<(BlockId, usize, Interval), CallId>,
 }
 
 impl SSAProgram {
@@ -108,32 +108,32 @@ impl SSAProgram {
         }
     }
 
-    pub fn intern_param(&mut self, function: Symbol, idx: usize) -> ParamId {
-        if let Some(id) = self.param_map.get(&(function, idx)) {
+    pub fn intern_param(&mut self, function: Symbol, idx: usize, analysis: Interval) -> ParamId {
+        if let Some(id) = self.param_map.get(&(function, idx, analysis)) {
             *id
         } else {
             let id = self.param_map.len();
-            self.param_map.insert((function, idx), id);
+            self.param_map.insert((function, idx, analysis), id);
             id
         }
     }
 
-    pub fn intern_knot(&mut self, block: BlockId, var: Symbol) -> ParamId {
-        if let Some(id) = self.knot_map.get(&(block, var)) {
+    pub fn intern_knot(&mut self, block: BlockId, var: Symbol, analysis: Interval) -> ParamId {
+        if let Some(id) = self.knot_map.get(&(block, var, analysis)) {
             *id
         } else {
             let id = self.knot_map.len();
-            self.knot_map.insert((block, var), id);
+            self.knot_map.insert((block, var, analysis), id);
             id
         }
     }
 
-    pub fn intern_call(&mut self, caller: BlockId, idx: usize) -> ParamId {
-        if let Some(id) = self.call_map.get(&(caller, idx)) {
+    pub fn intern_call(&mut self, caller: BlockId, idx: usize, analysis: Interval) -> ParamId {
+        if let Some(id) = self.call_map.get(&(caller, idx, analysis)) {
             *id
         } else {
             let id = self.call_map.len();
-            self.call_map.insert((caller, idx), id);
+            self.call_map.insert((caller, idx, analysis), id);
             id
         }
     }
@@ -175,22 +175,22 @@ impl Display for SSAProgram {
 
         if !self.param_map.is_empty() {
             writeln!(f, "\nParam IDs:")?;
-            for ((func, idx), id) in &self.param_map {
-                writeln!(f, "{}, {}: {}", func, idx, id)?;
+            for ((func, idx, analysis), id) in &self.param_map {
+                writeln!(f, "{}, {}, {}: {}", func, idx, analysis, id)?;
             }
         }
 
         if !self.knot_map.is_empty() {
             writeln!(f, "\nKnot IDs:")?;
-            for ((block, var), id) in &self.knot_map {
-                writeln!(f, "{}, {}: {}", block, var, id)?;
+            for ((block, var, analysis), id) in &self.knot_map {
+                writeln!(f, "{}, {}, {}: {}", block, var, analysis, id)?;
             }
         }
 
         if !self.call_map.is_empty() {
             writeln!(f, "\nCall IDs:")?;
-            for ((caller, idx), id) in &self.call_map {
-                writeln!(f, "{}, {}: {}", caller, idx, id)?;
+            for ((caller, idx, analysis), id) in &self.call_map {
+                writeln!(f, "{}, {}, {}: {}", caller, idx, analysis, id)?;
             }
         }
 
