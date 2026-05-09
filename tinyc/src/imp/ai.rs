@@ -15,10 +15,6 @@ pub fn create_ssa(ast: &FxHashMap<Symbol, FuncAST>) -> SSAProgram {
         callgraph: Default::default(),
     };
     if let Some(main) = ast.get(&Symbol::from("main")) {
-        state
-            .callgraph
-            .param_nodes
-            .insert(Symbol::from("main"), vec![]);
         state.interp_func(main, vec![]);
     }
     state.ssa.canon_cfg();
@@ -35,8 +31,8 @@ struct FIA<'a> {
 
 #[derive(Debug, Default)]
 struct Callgraph {
-    callers: FxHashMap<Symbol, FxHashSet<(Symbol, LabelId)>>,
-    param_nodes: FxHashMap<Symbol, Vec<Id>>,
+    callers: FxHashMap<Symbol, FxHashMap<LabelId, Vec<Id>>>,
+    implementations: FxHashMap<Symbol, Vec<Id>>,
 }
 
 // Flow sensitive abstraction (mapping from program variable to e-class ID).
@@ -65,6 +61,7 @@ impl<'a> FIA<'a> {
         block: BlockId,
     ) -> Option<(Vec<Id>, BlockId)> {
         let returned = Default::default();
+        assert_eq!(func.params.len(), args.len());
         let fsa = FSA {
             vars: zip(func.params.iter(), args)
                 .map(|(name, id)| (*name, id))
@@ -156,32 +153,30 @@ impl<'a> FIA<'a> {
     ) -> Option<FSA<'b>> {
         let args: Vec<_> = args.iter().map(|arg| self.interp_expr(arg, &fsa)).collect();
         let callers = self.callgraph.callers.entry(callee).or_default();
-        callers.insert((fsa.func, label));
+        callers.insert(label, args.clone());
 
         let outputs = if callers.len() < 2 {
-            self.callgraph.param_nodes.insert(callee, args.clone());
             let (outputs, block) =
                 self.interp_func_naked(&self.ast[&callee], args, fsa.func, fsa.block)?;
             fsa.block = block;
             outputs
         } else {
-            let param_nodes: Vec<_> = zip(&args, &self.callgraph.param_nodes[&callee])
-                .enumerate()
-                .map(|(idx, (new_arg, old_arg))| {
-                    if *new_arg == *old_arg {
-                        *new_arg
-                    } else {
+            let mut joined_args = args.clone();
+            for idx in 0..joined_args.len() {
+                for (_, other_args) in callers.iter() {
+                    if joined_args[idx] != other_args[idx] {
                         let param = self.ssa.intern_param(callee, idx, Interval::top());
-                        self.ssa.add_data(Dataflow::Param(param))
+                        joined_args[idx] = self.ssa.add_data(Dataflow::Param(param));
+                        break;
                     }
-                })
-                .collect();
-            let old_param_nodes = self
+                }
+            }
+            let old_implementation = self
                 .callgraph
-                .param_nodes
-                .insert(callee, param_nodes.clone());
-            if old_param_nodes.as_ref() != Some(&param_nodes) {
-                self.interp_func(&self.ast[&callee], param_nodes);
+                .implementations
+                .insert(callee, joined_args.clone());
+            if old_implementation.as_ref() != Some(&joined_args) {
+                self.interp_func(&self.ast[&callee], joined_args);
             }
 
             fsa.block = self.ssa.add_block(Block::Call(fsa.block, callee, args));
@@ -354,12 +349,15 @@ mod tests {
     #[test]
     fn translate1() {
         let program = r#"
-fn main() { x <- foo(5); y <- foo(3); return x * y; }
-fn foo(x) return x + 1;
+fn main() { x <- foo(5, 1); y <- foo(3, 5 - 4); return x * y; }
+fn foo(x, y) return x + y;
 "#;
         let mut counter = 0;
         let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
-        let _ssa = create_ssa(&parsed);
+        let ssa = create_ssa(&parsed);
+        assert_eq!(ssa.param_map.len(), 1);
+        assert_eq!(ssa.knot_map.len(), 0);
+        assert_eq!(ssa.call_map.len(), 1);
     }
 
     #[test]
@@ -370,7 +368,10 @@ fn foo(x) { x <- foo(x + 1); return x; }
 "#;
         let mut counter = 0;
         let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
-        let _ssa = create_ssa(&parsed);
+        let ssa = create_ssa(&parsed);
+        assert_eq!(ssa.param_map.len(), 1);
+        assert_eq!(ssa.knot_map.len(), 0);
+        assert_eq!(ssa.call_map.len(), 2);
     }
 
     #[test]
@@ -381,7 +382,10 @@ fn foo(x) { return x; }
 "#;
         let mut counter = 0;
         let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
-        let _ssa = create_ssa(&parsed);
+        let ssa = create_ssa(&parsed);
+        assert_eq!(ssa.param_map.len(), 0);
+        assert_eq!(ssa.knot_map.len(), 0);
+        assert_eq!(ssa.call_map.len(), 0);
     }
 
     #[test]
@@ -393,6 +397,9 @@ fn baz() { return 42; }
 "#;
         let mut counter = 0;
         let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
-        let _ssa = create_ssa(&parsed);
+        let ssa = create_ssa(&parsed);
+        assert_eq!(ssa.param_map.len(), 0);
+        assert_eq!(ssa.knot_map.len(), 2);
+        assert_eq!(ssa.call_map.len(), 0);
     }
 }

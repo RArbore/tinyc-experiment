@@ -56,16 +56,16 @@ pub enum Block {
 
 #[derive(Debug, Default)]
 pub struct SSAProgram {
-    dfg: EGraph<Dataflow, IntervalAnalysis>,
-    cfg: Vec<Block>,
-    entries: FxHashMap<Symbol, BlockId>,
+    pub dfg: EGraph<Dataflow, IntervalAnalysis>,
+    pub cfg: Vec<Block>,
+    pub entries: FxHashMap<Symbol, BlockId>,
 
     // Intern tuples of function name, parameter index, and analysis to ParamId.
-    param_map: FxHashMap<(Symbol, usize, Interval), ParamId>,
+    pub param_map: FxHashMap<(Symbol, usize, Interval), ParamId>,
     // Intern tuples of BlockId, variable name, and analysis to KnotId.
-    knot_map: FxHashMap<(BlockId, Symbol, Interval), KnotId>,
+    pub knot_map: FxHashMap<(BlockId, Symbol, Interval), KnotId>,
     // Intern tuples of BlockId (of a Call node), return value index, and analysis to CallId.
-    call_map: FxHashMap<(BlockId, usize, Interval), CallId>,
+    pub call_map: FxHashMap<(BlockId, usize, Interval), CallId>,
 }
 
 impl SSAProgram {
