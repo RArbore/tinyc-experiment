@@ -412,7 +412,6 @@ fn main() { x = 1; while x < 100 { x = x + (1 * 5); } return x; }
         assert_eq!(ssa.param_map.len(), 0);
         assert_eq!(ssa.knot_map.len(), 2);
         assert_eq!(ssa.call_map.len(), 0);
-        panic!("{}", ssa);
     }
 
     #[test]
@@ -428,5 +427,19 @@ fn baz() { return 42; }
         assert_eq!(ssa.param_map.len(), 0);
         assert_eq!(ssa.knot_map.len(), 4);
         assert_eq!(ssa.call_map.len(), 0);
+    }
+
+    #[test]
+    fn translate6() {
+        let program = r#"
+fn main() { x <- foo(7); return x; }
+fn foo(x) { if x { x <- foo(x - 1); return x + 1; } else { return 0; } }
+"#;
+        let mut counter = 0;
+        let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
+        let ssa = create_ssa(&parsed);
+        assert_eq!(ssa.param_map.len(), 1);
+        assert_eq!(ssa.knot_map.len(), 0);
+        assert_eq!(ssa.call_map.len(), 2);
     }
 }
