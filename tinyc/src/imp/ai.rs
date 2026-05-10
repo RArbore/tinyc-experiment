@@ -63,6 +63,7 @@ impl<'a> FIA<'a> {
         let (values, block) = self.interp_func_naked(func, args, func.name, entry)?;
         let return_block = self.ssa.add_block(Block::Return(block, values.clone()));
 
+        let mut output_changed = !self.callgraph.output_analyses.contains_key(&func.name);
         let output_analyses = self
             .callgraph
             .output_analyses
@@ -72,7 +73,6 @@ impl<'a> FIA<'a> {
                     .map(|idx| self.ssa.analysis(values[idx]))
                     .collect()
             });
-        let mut output_changed = false;
         for idx in 0..values.len() {
             let widened = output_analyses[idx].widen(&self.ssa.analysis(values[idx]));
             if widened != output_analyses[idx] {
@@ -433,7 +433,7 @@ fn foo(x, y) return x + y;
         let ssa = create_ssa(&parsed);
         assert_eq!(ssa.param_map.len(), 1);
         assert_eq!(ssa.knot_map.len(), 0);
-        assert_eq!(ssa.call_map.len(), 1);
+        assert_eq!(ssa.call_map.len(), 3);
     }
 
     #[test]
@@ -503,6 +503,6 @@ fn foo(x) { if x { x <- foo(x - 1); return x + 1; } else { return 0; } }
         let ssa = create_ssa(&parsed);
         assert_eq!(ssa.param_map.len(), 2);
         assert_eq!(ssa.knot_map.len(), 0);
-        assert_eq!(ssa.call_map.len(), 4);
+        assert_eq!(ssa.call_map.len(), 6);
     }
 }
