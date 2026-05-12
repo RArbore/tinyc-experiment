@@ -1,17 +1,15 @@
-use core::cell::RefCell;
 use core::mem::take;
-use std::rc::Rc;
 
 use egg::{Id, Symbol};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::nonssa::{Block, BlockId, Expr, NonSSAFunc, UnaryOp};
+use crate::analysis::interval::Interval;
+use crate::nonssa::{Block, BlockId, Expr, NonSSAFunc};
 use crate::ssa::{Dataflow, SSABlock, SSABlockId, SSAProgram};
 
-pub fn create_ssa(nonssa: FxHashMap<Symbol, NonSSAFunc>) -> SSAProgram {
+pub fn create_ssa(nonssa: &FxHashMap<Symbol, NonSSAFunc>) -> SSAProgram {
     let deps = deps(&nonssa);
     let mut context = AIContext {
-        nonssa,
         deps,
         ssa: Default::default(),
         states: Default::default(),
@@ -21,7 +19,7 @@ pub fn create_ssa(nonssa: FxHashMap<Symbol, NonSSAFunc>) -> SSAProgram {
     while !context.to_visit.is_empty() {
         let to_visit = take(&mut context.to_visit);
         for (func, block) in to_visit {
-            context.visit_block(func, block);
+            context.visit_block(&nonssa, func, block);
         }
     }
 
@@ -30,7 +28,6 @@ pub fn create_ssa(nonssa: FxHashMap<Symbol, NonSSAFunc>) -> SSAProgram {
 
 #[derive(Debug)]
 struct AIContext {
-    nonssa: FxHashMap<Symbol, NonSSAFunc>,
     deps: FxHashMap<Symbol, FxHashMap<BlockId, FxHashSet<BlockId>>>,
     ssa: SSAProgram,
 
@@ -60,7 +57,7 @@ impl AIContext {
             id
         }
     }
-    
+
     fn update_state(&mut self, func: Symbol, block: BlockId, state: AIState) {
         if let Some(old_state) = self.states.get(&(func, block))
             && old_state != &state
@@ -71,32 +68,184 @@ impl AIContext {
         }
     }
 
-    fn visit_block(&mut self, func: Symbol, block: BlockId) {
-        match &self.nonssa[&func].cfg[block] {
-            Block::Entry => self.visit_entry(func, block),
-            Block::Guard(pred, cond) => todo!(),
-            Block::Assign(pred, var, expr) => todo!(),
-            Block::Merge(pred1, pred2) => todo!(),
-            Block::Store(pred, pointer, expr) => todo!(),
-            Block::Call(pred, vars, callee, args) => todo!(),
-            Block::Return(pred, exprs) => todo!(),
+    fn visit_block(
+        &mut self,
+        nonssa: &FxHashMap<Symbol, NonSSAFunc>,
+        func: Symbol,
+        block: BlockId,
+    ) {
+        match &nonssa[&func].cfg[block] {
+            Block::Entry => self.visit_entry(nonssa, func, block),
+            Block::Guard(pred, cond) => self.visit_guard(func, block, *pred, cond),
+            Block::Assign(pred, var, expr) => self.visit_assign(func, block, *pred, *var, expr),
+            Block::Merge(pred1, pred2) => self.visit_merge(func, block, *pred1, *pred2),
+            Block::Store(pred, pointer, expr) => {
+                self.visit_store(func, block, *pred, pointer, expr)
+            }
+            Block::Call(pred, vars, callee, args) => {
+                self.visit_call(func, block, *pred, vars, *callee, args)
+            }
+            Block::Return(pred, exprs) => self.visit_return(func, block, *pred, exprs),
         }
     }
 
-    fn visit_entry(&mut self, func: Symbol, block: BlockId) {
-        let nonssa_func = &self.nonssa[&func];
-        let vars = nonssa_func
+    fn visit_entry(
+        &mut self,
+        nonssa: &FxHashMap<Symbol, NonSSAFunc>,
+        func: Symbol,
+        block: BlockId,
+    ) {
+        let vars = nonssa[&func]
             .params
             .iter()
             .enumerate()
-            .map(|(idx, param)| (*param, self.ssa.add_data(Dataflow::Param(idx))))
+            .map(|(idx, param)| {
+                let param_id = self.ssa.intern_param(func, idx, Interval::top());
+                (*param, self.ssa.add_data(Dataflow::Param(param_id)))
+            })
             .collect();
         let ssa_block = self.set_block(func, block, SSABlock::Entry);
-        let state = AIState {
-            vars,
-            ssa_block,
-        };
+        let state = AIState { vars, ssa_block };
         self.update_state(func, block, state);
+    }
+
+    fn visit_guard(&mut self, func: Symbol, block: BlockId, pred: BlockId, cond: &Expr) {
+        if let Some(mut state) = self.states.get(&(func, pred)).cloned() {
+            let value = self.add_expr(cond, &state);
+            state.ssa_block = self.set_block(func, block, SSABlock::Guard(state.ssa_block, value));
+            self.update_state(func, block, state);
+        }
+    }
+
+    fn visit_assign(
+        &mut self,
+        func: Symbol,
+        block: BlockId,
+        pred: BlockId,
+        var: Symbol,
+        expr: &Expr,
+    ) {
+        if let Some(mut state) = self.states.get(&(func, pred)).cloned() {
+            let value = self.add_expr(expr, &state);
+            state.vars.insert(var, value);
+            self.update_state(func, block, state);
+        }
+    }
+
+    fn visit_merge(&mut self, func: Symbol, block: BlockId, pred1: BlockId, pred2: BlockId) {
+        match (
+            self.states.get(&(func, pred1)).cloned(),
+            self.states.get(&(func, pred2)).cloned(),
+        ) {
+            (Some(state1), Some(state2)) => {
+                let ssa_block = self.set_block(
+                    func,
+                    block,
+                    SSABlock::Merge(state1.ssa_block, state2.ssa_block),
+                );
+
+                let mut new_vars = FxHashMap::default();
+                for (var, value1) in &state1.vars {
+                    if let Some(value2) = state2.vars.get(var) {
+                        if value1 == value2 {
+                            new_vars.insert(*var, *value1);
+                        } else {
+                            let knot = self.ssa.intern_knot(ssa_block, *var, Interval::top());
+                            let knot = self.ssa.add_data(Dataflow::Knot(knot));
+                            new_vars.insert(*var, knot);
+                        }
+                    }
+                }
+
+                let state = AIState {
+                    vars: new_vars,
+                    ssa_block,
+                };
+                self.update_state(func, block, state);
+            }
+            (None, Some(state)) | (Some(state), None) => self.update_state(func, block, state),
+            (None, None) => {}
+        }
+    }
+
+    fn visit_store(
+        &mut self,
+        func: Symbol,
+        block: BlockId,
+        pred: BlockId,
+        pointer: &Expr,
+        expr: &Expr,
+    ) {
+        if let Some(mut state) = self.states.get(&(func, pred)).cloned() {
+            let pointer_value = self.add_expr(pointer, &state);
+            let to_store_value = self.add_expr(expr, &state);
+            state.ssa_block = self.set_block(
+                func,
+                block,
+                SSABlock::Store(state.ssa_block, pointer_value, to_store_value),
+            );
+            self.update_state(func, block, state);
+        }
+    }
+
+    fn visit_call(
+        &mut self,
+        func: Symbol,
+        block: BlockId,
+        pred: BlockId,
+        vars: &Vec<Symbol>,
+        callee: Symbol,
+        args: &Vec<Expr>,
+    ) {
+        if let Some(mut state) = self.states.get(&(func, pred)).cloned() {
+            let arg_values = args
+                .iter()
+                .map(|expr| self.add_expr(expr, &state))
+                .collect();
+            state.ssa_block = self.set_block(
+                func,
+                block,
+                SSABlock::Call(state.ssa_block, callee, arg_values),
+            );
+            for (idx, var) in vars.iter().enumerate() {
+                let call = self.ssa.intern_call(state.ssa_block, idx, Interval::top());
+                let call = self.ssa.add_data(Dataflow::Call(call));
+                state.vars.insert(*var, call);
+            }
+            self.update_state(func, block, state);
+        }
+    }
+
+    fn visit_return(&mut self, func: Symbol, block: BlockId, pred: BlockId, exprs: &Vec<Expr>) {
+        if let Some(mut state) = self.states.get(&(func, pred)).cloned() {
+            let values = exprs
+                .iter()
+                .map(|expr| self.add_expr(expr, &state))
+                .collect();
+            state.ssa_block =
+                self.set_block(func, block, SSABlock::Return(state.ssa_block, values));
+            self.update_state(func, block, state);
+        }
+    }
+
+    fn add_expr(&mut self, expr: &Expr, state: &AIState) -> Id {
+        match expr {
+            Expr::Number(cons) => self.ssa.add_data(Dataflow::Constant(*cons)),
+            Expr::Variable(var) => state.vars[var],
+            Expr::Unary { op, input } => {
+                let input = self.add_expr(input, state);
+                self.ssa.add_data(Dataflow::Unary(*op, input))
+            }
+            Expr::Binary { op, lhs, rhs } => {
+                let lhs = self.add_expr(lhs, state);
+                let rhs = self.add_expr(rhs, state);
+                self.ssa.add_data(Dataflow::Binary(*op, [lhs, rhs]))
+            }
+            Expr::Load { pointer } => {
+                let pointer = self.add_expr(pointer, state);
+                self.ssa.add_data(Dataflow::Load(state.ssa_block, pointer))
+            }
+        }
     }
 }
 

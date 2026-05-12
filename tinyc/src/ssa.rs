@@ -28,7 +28,7 @@ define_language! {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SSABlock {
     Entry,
-    Child(SSABlockId, Id),
+    Guard(SSABlockId, Id),
     Merge(SSABlockId, SSABlockId),
     Store(SSABlockId, Id, Id),
     Call(SSABlockId, Symbol, Vec<Id>),
@@ -82,7 +82,7 @@ impl SSAProgram {
         for block in &mut self.cfg {
             match block {
                 SSABlock::Entry | SSABlock::Merge(_, _) => {}
-                SSABlock::Child(_, cond) => *cond = self.dfg.find(*cond),
+                SSABlock::Guard(_, cond) => *cond = self.dfg.find(*cond),
                 SSABlock::Store(_, ptr, value) => {
                     *ptr = self.dfg.find(*ptr);
                     *value = self.dfg.find(*value);
