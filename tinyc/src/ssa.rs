@@ -132,7 +132,10 @@ impl Display for SSAProgram {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         writeln!(f, "DFG:")?;
         let mut classes: Vec<_> = self.dfg.classes().collect();
-        let indent = max(classes.len().ilog10(), self.cfg.len().ilog10()) + 3;
+        let indent = max(
+            max(classes.len(), 1).ilog10(),
+            max(self.cfg.len(), 1).ilog10(),
+        ) + 3;
         classes.sort_by_key(|class| class.id);
         for class in classes {
             write!(f, "{}:", class.id)?;

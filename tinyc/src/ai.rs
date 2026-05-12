@@ -17,12 +17,12 @@ pub fn create_ssa(nonssa: &FxHashMap<Symbol, NonSSAFunc>) -> SSAProgram {
     };
 
     while !context.to_visit.is_empty() {
-        let to_visit = take(&mut context.to_visit);
-        for (func, block) in to_visit {
+        for (func, block) in take(&mut context.to_visit) {
             context.visit_block(&nonssa, func, block);
         }
     }
 
+    context.ssa.canon_cfg();
     context.ssa
 }
 
@@ -59,8 +59,11 @@ impl AIContext {
     }
 
     fn update_state(&mut self, func: Symbol, block: BlockId, state: AIState) {
-        if let Some(old_state) = self.states.get(&(func, block))
-            && old_state != &state
+        if self
+            .states
+            .get(&(func, block))
+            .map(|old_state| old_state != &state)
+            .unwrap_or(true)
         {
             self.states.insert((func, block), state);
             self.to_visit
@@ -112,8 +115,11 @@ impl AIContext {
     fn visit_guard(&mut self, func: Symbol, block: BlockId, pred: BlockId, cond: &Expr) {
         if let Some(mut state) = self.states.get(&(func, pred)).cloned() {
             let value = self.add_expr(cond, &state);
-            state.ssa_block = self.set_block(func, block, SSABlock::Guard(state.ssa_block, value));
-            self.update_state(func, block, state);
+            if !self.ssa.is_always_false(value) {
+                state.ssa_block =
+                    self.set_block(func, block, SSABlock::Guard(state.ssa_block, value));
+                self.update_state(func, block, state);
+            }
         }
     }
 
@@ -278,4 +284,95 @@ fn deps(
             (func.name, deps)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ai::create_ssa;
+    use crate::imp::ast::convert_to_cfg;
+    use crate::imp::grammar::ProgramParser;
+
+    #[test]
+    fn translate1() {
+        let program = r#"
+fn main() { x <- foo(5, 1); y <- foo(3, 5 - 4); return x * y; }
+fn foo(x, y) return x + y;
+"#;
+        let parsed = ProgramParser::new().parse(&program).unwrap();
+        let nonssa = parsed
+            .into_iter()
+            .map(|(name, func)| (name, convert_to_cfg(func)))
+            .collect();
+        let ssa = create_ssa(&nonssa);
+    }
+
+    #[test]
+    fn translate2() {
+        let program = r#"
+fn main() { x <- foo(7); return x; }
+fn foo(x) { x <- foo(x + 1); return x; }
+"#;
+        let parsed = ProgramParser::new().parse(&program).unwrap();
+        let nonssa = parsed
+            .into_iter()
+            .map(|(name, func)| (name, convert_to_cfg(func)))
+            .collect();
+        let ssa = create_ssa(&nonssa);
+    }
+
+    #[test]
+    fn translate3() {
+        let program = r#"
+fn main() { if 0 { x <- foo(24); } else { x = 42; } return x; }
+fn foo(x) { return x; }
+"#;
+        let parsed = ProgramParser::new().parse(&program).unwrap();
+        let nonssa = parsed
+            .into_iter()
+            .map(|(name, func)| (name, convert_to_cfg(func)))
+            .collect();
+        let ssa = create_ssa(&nonssa);
+    }
+
+    #[test]
+    fn translate4() {
+        let program = r#"
+fn main() { x = 1; while x < 100 { x = x + (1 * 5); } return x; }
+"#;
+        let parsed = ProgramParser::new().parse(&program).unwrap();
+        let nonssa = parsed
+            .into_iter()
+            .map(|(name, func)| (name, convert_to_cfg(func)))
+            .collect();
+        let ssa = create_ssa(&nonssa);
+    }
+
+    #[test]
+    fn translate5() {
+        let program = r#"
+fn main() { x = 1; while x < 100 { x = x + (1 * 5); } foo(); return x; }
+fn foo() { x = 5; y = 8; while y < 100 { x = x + 1; } baz(); return y; }
+fn baz() { return 42; }
+"#;
+        let parsed = ProgramParser::new().parse(&program).unwrap();
+        let nonssa = parsed
+            .into_iter()
+            .map(|(name, func)| (name, convert_to_cfg(func)))
+            .collect();
+        let ssa = create_ssa(&nonssa);
+    }
+
+    #[test]
+    fn translate6() {
+        let program = r#"
+fn main() { x <- foo(7); return x; }
+fn foo(x) { if x { x <- foo(x - 1); return x + 1; } else { return 0; } }
+"#;
+        let parsed = ProgramParser::new().parse(&program).unwrap();
+        let nonssa = parsed
+            .into_iter()
+            .map(|(name, func)| (name, convert_to_cfg(func)))
+            .collect();
+        let ssa = create_ssa(&nonssa);
+    }
 }
