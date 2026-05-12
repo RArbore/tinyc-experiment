@@ -2,14 +2,7 @@ use core::fmt::{Display, Formatter, Result};
 
 use egg::Symbol;
 
-use crate::nonssa::Expr;
-
-pub type LabelId = usize;
-pub fn inc_label(counter: &mut LabelId) -> LabelId {
-    let label = *counter;
-    *counter += 1;
-    label
-}
+use crate::nonssa::{Block, BlockId, Expr, NonSSAFunc, UnaryOp};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImpFunc {
@@ -26,35 +19,110 @@ pub enum ImpStmt {
     Assign {
         var: Symbol,
         expr: Expr,
-        label: LabelId,
     },
     Store {
         pointer: Expr,
         expr: Expr,
-        label: LabelId,
     },
     Call {
         vars: Vec<Symbol>,
         callee: Symbol,
         args: Vec<Expr>,
-        label: LabelId,
     },
     IfElse {
         cond: Expr,
         then_body: Box<ImpStmt>,
         else_body: Box<ImpStmt>,
-        merge: LabelId,
     },
     While {
         cond: Expr,
         body: Box<ImpStmt>,
-        header: LabelId,
-        exit: LabelId,
     },
     Return {
         exprs: Vec<Expr>,
-        label: LabelId,
     },
+}
+
+pub fn convert_to_cfg(func: ImpFunc) -> NonSSAFunc {
+    let mut new_func = NonSSAFunc {
+        name: func.name,
+        params: func.params,
+        cfg: vec![Block::Entry],
+    };
+    convert_to_cfg_helper(0, func.body, &mut new_func.cfg);
+    new_func
+}
+
+fn convert_to_cfg_helper(pred: BlockId, stmt: ImpStmt, cfg: &mut Vec<Block>) -> Option<BlockId> {
+    let add_block = |block, cfg: &mut Vec<Block>| {
+        let id = cfg.len();
+        cfg.push(block);
+        id
+    };
+    match stmt {
+        ImpStmt::Block { body } => {
+            let mut id = pred;
+            for stmt in body {
+                id = convert_to_cfg_helper(id, stmt, cfg)?;
+            }
+            Some(id)
+        }
+        ImpStmt::Assign { var, expr } => Some(add_block(Block::Assign(pred, var, expr), cfg)),
+        ImpStmt::Store { pointer, expr } => Some(add_block(Block::Store(pred, pointer, expr), cfg)),
+        ImpStmt::Call { vars, callee, args } => {
+            Some(add_block(Block::Call(pred, vars, callee, args), cfg))
+        }
+        ImpStmt::IfElse {
+            cond,
+            then_body,
+            else_body,
+        } => {
+            let then_guard = add_block(Block::Guard(pred, cond.clone()), cfg);
+            let else_guard = add_block(
+                Block::Guard(
+                    pred,
+                    Expr::Unary {
+                        op: UnaryOp::Not,
+                        input: Box::new(cond),
+                    },
+                ),
+                cfg,
+            );
+            let then_block = convert_to_cfg_helper(then_guard, *then_body, cfg);
+            let else_block = convert_to_cfg_helper(else_guard, *else_body, cfg);
+            match (then_block, else_block) {
+                (Some(then_block), Some(else_block)) => {
+                    Some(add_block(Block::Merge(then_block, else_block), cfg))
+                }
+                (None, block) | (block, None) => block,
+            }
+        }
+        ImpStmt::While { cond, body } => {
+            let header = add_block(Block::Entry, cfg);
+            let then_guard = add_block(Block::Guard(header, cond.clone()), cfg);
+            let else_guard = add_block(
+                Block::Guard(
+                    header,
+                    Expr::Unary {
+                        op: UnaryOp::Not,
+                        input: Box::new(cond),
+                    },
+                ),
+                cfg,
+            );
+            let body_block = convert_to_cfg_helper(then_guard, *body, cfg);
+            cfg[header] = if let Some(body_block) = body_block {
+                Block::Merge(pred, body_block)
+            } else {
+                Block::Guard(pred, Expr::Number(1))
+            };
+            Some(else_guard)
+        }
+        ImpStmt::Return { exprs } => {
+            add_block(Block::Return(pred, exprs), cfg);
+            None
+        }
+    }
 }
 
 impl Display for ImpFunc {
@@ -140,8 +208,7 @@ mod tests {
 fn test1(x) return x;
 fn test2(y) { *y = 3; y <- test1(y); return y, *y + 1; }
 "#;
-        let mut counter = 0;
-        let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
+        let parsed = ProgramParser::new().parse(&program).unwrap();
         assert_eq!(
             format!("{}", parsed[&Symbol::from("test1")]),
             "fn test1(x) return x;"
@@ -157,8 +224,7 @@ fn test2(y) { *y = 3; y <- test1(y); return y, *y + 1; }
         let program = r#"
 fn test(x, y) { while x < 7 { x = x + 1; } if y < x { return y; } return x + 9; }
 "#;
-        let mut counter = 0;
-        let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
+        let parsed = ProgramParser::new().parse(&program).unwrap();
         assert_eq!(
             format!("{}", parsed[&Symbol::from("test")]),
             "fn test(x, y) { while (x < 7) { { x = (x + 1); } } if (y < x) { { return y; } } else { { } } return (x + 9); }"

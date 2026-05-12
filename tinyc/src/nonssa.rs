@@ -40,6 +40,25 @@ pub enum Expr {
     },
 }
 
+pub type BlockId = usize;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Block {
+    Entry,
+    Guard(BlockId, Expr),
+    Assign(BlockId, Symbol, Expr),
+    Merge(BlockId, BlockId),
+    Store(BlockId, Expr, Expr),
+    Call(BlockId, Vec<Symbol>, Symbol, Vec<Expr>),
+    Return(BlockId, Vec<Expr>),
+}
+
+pub struct NonSSAFunc {
+    pub name: Symbol,
+    pub params: Vec<Symbol>,
+    pub cfg: Vec<Block>,
+}
+
 impl Display for Expr {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         match self {

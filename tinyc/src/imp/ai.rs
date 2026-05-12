@@ -7,7 +7,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::analysis::interval::Interval;
 use crate::imp::ast::{ImpFunc, ImpStmt, LabelId};
 use crate::nonssa::{Expr, UnaryOp};
-use crate::ssa::{BlockId, Dataflow, SSABlock, SSAProgram};
+use crate::ssa::{Dataflow, SSABlock, SSABlockId, SSAProgram};
 
 pub fn create_ssa(ast: &FxHashMap<Symbol, ImpFunc>) -> SSAProgram {
     let mut state = FIA {
@@ -53,12 +53,12 @@ struct Callgraph {
 struct FSA<'a> {
     vars: FxHashMap<Symbol, Id>,
     func: Symbol,
-    block: BlockId,
-    returned: &'a RefCell<FxHashSet<(BlockId, Vec<Id>)>>,
+    block: SSABlockId,
+    returned: &'a RefCell<FxHashSet<(SSABlockId, Vec<Id>)>>,
 }
 
 impl<'a> FIA<'a> {
-    fn interp_func(&mut self, func: &'a ImpFunc, args: Vec<Id>) -> Option<(Vec<Id>, BlockId)> {
+    fn interp_func(&mut self, func: &'a ImpFunc, args: Vec<Id>) -> Option<(Vec<Id>, SSABlockId)> {
         let entry = self.ssa.add_block(SSABlock::Entry);
         self.ssa.add_entry(func.name, entry);
         let (values, block) = self.interp_func_naked(func, args, func.name, entry)?;
@@ -93,8 +93,8 @@ impl<'a> FIA<'a> {
         func: &'a ImpFunc,
         args: Vec<Id>,
         func_name: Symbol,
-        block: BlockId,
-    ) -> Option<(Vec<Id>, BlockId)> {
+        block: SSABlockId,
+    ) -> Option<(Vec<Id>, SSABlockId)> {
         let returned = Default::default();
         assert_eq!(func.params.len(), args.len());
         let fsa = FSA {
@@ -426,8 +426,7 @@ mod tests {
 fn main() { x <- foo(5, 1); y <- foo(3, 5 - 4); return x * y; }
 fn foo(x, y) return x + y;
 "#;
-        let mut counter = 0;
-        let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
+        let parsed = ProgramParser::new().parse(&program).unwrap();
         let ssa = create_ssa(&parsed);
         assert_eq!(ssa.param_map.len(), 1);
         assert_eq!(ssa.knot_map.len(), 0);
@@ -440,8 +439,7 @@ fn foo(x, y) return x + y;
 fn main() { x <- foo(7); return x; }
 fn foo(x) { x <- foo(x + 1); return x; }
 "#;
-        let mut counter = 0;
-        let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
+        let parsed = ProgramParser::new().parse(&program).unwrap();
         let ssa = create_ssa(&parsed);
         assert_eq!(ssa.param_map.len(), 2);
         assert_eq!(ssa.knot_map.len(), 0);
@@ -454,8 +452,7 @@ fn foo(x) { x <- foo(x + 1); return x; }
 fn main() { if 0 { x <- foo(24); } else { x = 42; } return x; }
 fn foo(x) { return x; }
 "#;
-        let mut counter = 0;
-        let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
+        let parsed = ProgramParser::new().parse(&program).unwrap();
         let ssa = create_ssa(&parsed);
         assert_eq!(ssa.param_map.len(), 0);
         assert_eq!(ssa.knot_map.len(), 0);
@@ -467,8 +464,7 @@ fn foo(x) { return x; }
         let program = r#"
 fn main() { x = 1; while x < 100 { x = x + (1 * 5); } return x; }
 "#;
-        let mut counter = 0;
-        let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
+        let parsed = ProgramParser::new().parse(&program).unwrap();
         let ssa = create_ssa(&parsed);
         assert_eq!(ssa.param_map.len(), 0);
         assert_eq!(ssa.knot_map.len(), 2);
@@ -482,8 +478,7 @@ fn main() { x = 1; while x < 100 { x = x + (1 * 5); } foo(); return x; }
 fn foo() { x = 5; y = 8; while y < 100 { x = x + 1; } baz(); return y; }
 fn baz() { return 42; }
 "#;
-        let mut counter = 0;
-        let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
+        let parsed = ProgramParser::new().parse(&program).unwrap();
         let ssa = create_ssa(&parsed);
         assert_eq!(ssa.param_map.len(), 0);
         assert_eq!(ssa.knot_map.len(), 4);
@@ -496,8 +491,7 @@ fn baz() { return 42; }
 fn main() { x <- foo(7); return x; }
 fn foo(x) { if x { x <- foo(x - 1); return x + 1; } else { return 0; } }
 "#;
-        let mut counter = 0;
-        let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
+        let parsed = ProgramParser::new().parse(&program).unwrap();
         let ssa = create_ssa(&parsed);
         assert_eq!(ssa.param_map.len(), 2);
         assert_eq!(ssa.knot_map.len(), 0);

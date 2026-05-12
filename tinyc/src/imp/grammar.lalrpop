@@ -3,10 +3,10 @@ use core::str::FromStr;
 use egg::Symbol;
 use rustc_hash::FxHashMap;
 
-use crate::imp::ast::{ImpFunc, ImpStmt, LabelId, inc_label};
+use crate::imp::ast::{ImpFunc, ImpStmt};
 use crate::nonssa::{BinaryOp, Expr, UnaryOp};
 
-grammar(counter: &mut LabelId);
+grammar();
 
 pub Program: FxHashMap<Symbol, ImpFunc> = {
     Func* => <>.into_iter().collect(),
@@ -18,13 +18,13 @@ Func: (Symbol, ImpFunc) = {
 
 Stmt: ImpStmt = {
     Block => <>,
-    <var:Iden> "=" <expr:BinaryExpr> ";" => ImpStmt::Assign { var, expr, label: inc_label(counter) },
-    "*" <pointer:BinaryExpr> "=" <expr:BinaryExpr> ";" => ImpStmt::Store { pointer, expr, label: inc_label(counter) },
-    <vars:List<Iden>> "<-" <callee:Iden> "(" <args:List<BinaryExpr>> ")" ";" => ImpStmt::Call { vars, callee, args, label: inc_label(counter) },
-    <callee:Iden> "(" <args:List<BinaryExpr>> ")" ";" => ImpStmt::Call { vars: vec![], callee, args, label: inc_label(counter) },
-    "if" <cond:BinaryExpr> <then_body:Block> <else_body:("else" <Block>)?> => ImpStmt::IfElse { cond, then_body: Box::new(then_body), else_body: Box::new(else_body.unwrap_or_else(|| ImpStmt::Block { body: vec![] })), merge: inc_label(counter) },
-    "while" <cond:BinaryExpr> <body:Block> => ImpStmt::While { cond, body: Box::new(body), header: inc_label(counter), exit: inc_label(counter) },
-    "return" <exprs:List<BinaryExpr>> ";" => ImpStmt::Return { exprs, label: inc_label(counter) },
+    <var:Iden> "=" <expr:BinaryExpr> ";" => ImpStmt::Assign { var, expr },
+    "*" <pointer:BinaryExpr> "=" <expr:BinaryExpr> ";" => ImpStmt::Store { pointer, expr },
+    <vars:List<Iden>> "<-" <callee:Iden> "(" <args:List<BinaryExpr>> ")" ";" => ImpStmt::Call { vars, callee, args },
+    <callee:Iden> "(" <args:List<BinaryExpr>> ")" ";" => ImpStmt::Call { vars: vec![], callee, args },
+    "if" <cond:BinaryExpr> <then_body:Block> <else_body:("else" <Block>)?> => ImpStmt::IfElse { cond, then_body: Box::new(then_body), else_body: Box::new(else_body.unwrap_or_else(|| ImpStmt::Block { body: vec![] })) },
+    "while" <cond:BinaryExpr> <body:Block> => ImpStmt::While { cond, body: Box::new(body) },
+    "return" <exprs:List<BinaryExpr>> ";" => ImpStmt::Return { exprs },
 }
 
 Block: ImpStmt = "{" <body:Stmt*> "}" => ImpStmt::Block { body };
