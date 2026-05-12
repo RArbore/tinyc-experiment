@@ -44,83 +44,115 @@ pub enum ImpStmt {
 }
 
 pub fn convert_to_cfg(func: ImpFunc) -> NonSSAFunc {
-    let mut new_func = NonSSAFunc {
+    let mut convert_context = ConvertContext {
+        cfg: vec![Block::Entry],
+        returns: vec![],
+        num_returned: None,
+    };
+    convert_context.convert(0, func.body);
+
+    if let Some(mut block) = convert_context.returns.get(0).copied() {
+        for idx in 1..convert_context.returns.len() {
+            block = convert_context.add_block(Block::Merge(block, convert_context.returns[idx]));
+        }
+        convert_context.add_block(Block::Return(
+            block,
+            (0..convert_context.num_returned.unwrap())
+                .map(|idx| Expr::Variable(Symbol::from(format!("%{}", idx))))
+                .collect(),
+        ));
+    }
+
+    NonSSAFunc {
         name: func.name,
         params: func.params,
-        cfg: vec![Block::Entry],
-    };
-    convert_to_cfg_helper(0, func.body, &mut new_func.cfg);
-    new_func
+        cfg: convert_context.cfg,
+    }
 }
 
-fn convert_to_cfg_helper(pred: BlockId, stmt: ImpStmt, cfg: &mut Vec<Block>) -> Option<BlockId> {
-    let add_block = |block, cfg: &mut Vec<Block>| {
-        let id = cfg.len();
-        cfg.push(block);
+struct ConvertContext {
+    cfg: Vec<Block>,
+    returns: Vec<BlockId>,
+    num_returned: Option<usize>,
+}
+
+impl ConvertContext {
+    fn add_block(&mut self, block: Block) -> BlockId {
+        let id = self.cfg.len();
+        self.cfg.push(block);
         id
-    };
-    match stmt {
-        ImpStmt::Block { body } => {
-            let mut id = pred;
-            for stmt in body {
-                id = convert_to_cfg_helper(id, stmt, cfg)?;
+    }
+
+    fn convert(&mut self, pred: BlockId, stmt: ImpStmt) -> Option<BlockId> {
+        match stmt {
+            ImpStmt::Block { body } => {
+                let mut id = pred;
+                for stmt in body {
+                    id = self.convert(id, stmt)?;
+                }
+                Some(id)
             }
-            Some(id)
-        }
-        ImpStmt::Assign { var, expr } => Some(add_block(Block::Assign(pred, var, expr), cfg)),
-        ImpStmt::Store { pointer, expr } => Some(add_block(Block::Store(pred, pointer, expr), cfg)),
-        ImpStmt::Call { vars, callee, args } => {
-            Some(add_block(Block::Call(pred, vars, callee, args), cfg))
-        }
-        ImpStmt::IfElse {
-            cond,
-            then_body,
-            else_body,
-        } => {
-            let then_guard = add_block(Block::Guard(pred, cond.clone()), cfg);
-            let else_guard = add_block(
-                Block::Guard(
+            ImpStmt::Assign { var, expr } => Some(self.add_block(Block::Assign(pred, var, expr))),
+            ImpStmt::Store { pointer, expr } => {
+                Some(self.add_block(Block::Store(pred, pointer, expr)))
+            }
+            ImpStmt::Call { vars, callee, args } => {
+                Some(self.add_block(Block::Call(pred, vars, callee, args)))
+            }
+            ImpStmt::IfElse {
+                cond,
+                then_body,
+                else_body,
+            } => {
+                let then_guard = self.add_block(Block::Guard(pred, cond.clone()));
+                let else_guard = self.add_block(Block::Guard(
                     pred,
                     Expr::Unary {
                         op: UnaryOp::Not,
                         input: Box::new(cond),
                     },
-                ),
-                cfg,
-            );
-            let then_block = convert_to_cfg_helper(then_guard, *then_body, cfg);
-            let else_block = convert_to_cfg_helper(else_guard, *else_body, cfg);
-            match (then_block, else_block) {
-                (Some(then_block), Some(else_block)) => {
-                    Some(add_block(Block::Merge(then_block, else_block), cfg))
+                ));
+                let then_block = self.convert(then_guard, *then_body);
+                let else_block = self.convert(else_guard, *else_body);
+                match (then_block, else_block) {
+                    (Some(then_block), Some(else_block)) => {
+                        Some(self.add_block(Block::Merge(then_block, else_block)))
+                    }
+                    (None, block) | (block, None) => block,
                 }
-                (None, block) | (block, None) => block,
             }
-        }
-        ImpStmt::While { cond, body } => {
-            let header = add_block(Block::Entry, cfg);
-            let then_guard = add_block(Block::Guard(header, cond.clone()), cfg);
-            let else_guard = add_block(
-                Block::Guard(
+            ImpStmt::While { cond, body } => {
+                let header = self.add_block(Block::Entry);
+                let then_guard = self.add_block(Block::Guard(header, cond.clone()));
+                let else_guard = self.add_block(Block::Guard(
                     header,
                     Expr::Unary {
                         op: UnaryOp::Not,
                         input: Box::new(cond),
                     },
-                ),
-                cfg,
-            );
-            let body_block = convert_to_cfg_helper(then_guard, *body, cfg);
-            cfg[header] = if let Some(body_block) = body_block {
-                Block::Merge(pred, body_block)
-            } else {
-                Block::Guard(pred, Expr::Number(1))
-            };
-            Some(else_guard)
-        }
-        ImpStmt::Return { exprs } => {
-            add_block(Block::Return(pred, exprs), cfg);
-            None
+                ));
+                let body_block = self.convert(then_guard, *body);
+                self.cfg[header] = if let Some(body_block) = body_block {
+                    Block::Merge(pred, body_block)
+                } else {
+                    Block::Guard(pred, Expr::Number(1))
+                };
+                Some(else_guard)
+            }
+            ImpStmt::Return { exprs } => {
+                let mut block = pred;
+                assert!(self.num_returned.is_none() || self.num_returned == Some(exprs.len()));
+                self.num_returned = Some(exprs.len());
+                for (idx, expr) in exprs.into_iter().enumerate() {
+                    block = self.add_block(Block::Assign(
+                        block,
+                        Symbol::from(format!("%{}", idx)),
+                        expr,
+                    ));
+                }
+                self.returns.push(block);
+                None
+            }
         }
     }
 }

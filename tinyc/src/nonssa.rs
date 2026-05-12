@@ -53,6 +53,7 @@ pub enum Block {
     Return(BlockId, Vec<Expr>),
 }
 
+#[derive(Debug)]
 pub struct NonSSAFunc {
     pub name: Symbol,
     pub params: Vec<Symbol>,
