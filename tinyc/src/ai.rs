@@ -110,6 +110,7 @@ impl AIContext {
         let ssa_block = self.set_block(func, block, SSABlock::Entry);
         let state = AIState { vars, ssa_block };
         self.update_state(func, block, state);
+        self.ssa.entries.insert(func, ssa_block);
     }
 
     fn visit_guard(&mut self, func: Symbol, block: BlockId, pred: BlockId, cond: &Expr) {
@@ -219,6 +220,7 @@ impl AIContext {
                 state.vars.insert(*var, call);
             }
             self.update_state(func, block, state);
+            self.to_visit.insert((callee, 0));
         }
     }
 
