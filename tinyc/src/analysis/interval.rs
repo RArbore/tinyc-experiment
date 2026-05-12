@@ -3,7 +3,8 @@ use core::fmt::{Display, Formatter, Result};
 
 use egg::{Analysis, DidMerge, EGraph, Id};
 
-use crate::ssa::{BinaryOp, Dataflow, UnaryOp};
+use crate::nonssa::{BinaryOp, UnaryOp};
+use crate::ssa::Dataflow;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Bound {

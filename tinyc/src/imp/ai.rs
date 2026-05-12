@@ -5,10 +5,11 @@ use egg::{Id, Symbol};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::analysis::interval::Interval;
-use crate::imp::ast::{ExprAST, FuncAST, LabelId, StmtAST};
-use crate::ssa::{Block, BlockId, Dataflow, SSAProgram, UnaryOp};
+use crate::imp::ast::{ImpFunc, ImpStmt, LabelId};
+use crate::nonssa::{Expr, UnaryOp};
+use crate::ssa::{BlockId, Dataflow, SSABlock, SSAProgram};
 
-pub fn create_ssa(ast: &FxHashMap<Symbol, FuncAST>) -> SSAProgram {
+pub fn create_ssa(ast: &FxHashMap<Symbol, ImpFunc>) -> SSAProgram {
     let mut state = FIA {
         ast,
         ssa: Default::default(),
@@ -33,7 +34,7 @@ pub fn create_ssa(ast: &FxHashMap<Symbol, FuncAST>) -> SSAProgram {
 // Flow insensitive abstraction (the SSA program being built and the call graph).
 #[derive(Debug)]
 struct FIA<'a> {
-    ast: &'a FxHashMap<Symbol, FuncAST>,
+    ast: &'a FxHashMap<Symbol, ImpFunc>,
     ssa: SSAProgram,
     callgraph: Callgraph,
     callers_to_revisit: Vec<Symbol>,
@@ -57,11 +58,11 @@ struct FSA<'a> {
 }
 
 impl<'a> FIA<'a> {
-    fn interp_func(&mut self, func: &'a FuncAST, args: Vec<Id>) -> Option<(Vec<Id>, BlockId)> {
-        let entry = self.ssa.add_block(Block::Entry);
+    fn interp_func(&mut self, func: &'a ImpFunc, args: Vec<Id>) -> Option<(Vec<Id>, BlockId)> {
+        let entry = self.ssa.add_block(SSABlock::Entry);
         self.ssa.add_entry(func.name, entry);
         let (values, block) = self.interp_func_naked(func, args, func.name, entry)?;
-        let return_block = self.ssa.add_block(Block::Return(block, values.clone()));
+        let return_block = self.ssa.add_block(SSABlock::Return(block, values.clone()));
 
         let mut output_changed = !self.callgraph.output_analyses.contains_key(&func.name);
         let output_analyses = self
@@ -89,7 +90,7 @@ impl<'a> FIA<'a> {
 
     fn interp_func_naked(
         &mut self,
-        func: &'a FuncAST,
+        func: &'a ImpFunc,
         args: Vec<Id>,
         func_name: Symbol,
         block: BlockId,
@@ -109,7 +110,7 @@ impl<'a> FIA<'a> {
         let mut returned = returned.into_inner().into_iter();
         let (mut acc_block, mut acc_values) = returned.next()?;
         for (new_block, new_values) in returned {
-            acc_block = self.ssa.add_block(Block::Merge(acc_block, new_block));
+            acc_block = self.ssa.add_block(SSABlock::Merge(acc_block, new_block));
             assert_eq!(acc_values.len(), new_values.len());
             for idx in 0..acc_values.len() {
                 if acc_values[idx] != new_values[idx] {
@@ -122,32 +123,32 @@ impl<'a> FIA<'a> {
         Some((acc_values, acc_block))
     }
 
-    fn interp_stmt<'b>(&mut self, stmt: &'a StmtAST, fsa: FSA<'b>) -> Option<FSA<'b>> {
+    fn interp_stmt<'b>(&mut self, stmt: &'a ImpStmt, fsa: FSA<'b>) -> Option<FSA<'b>> {
         match stmt {
-            StmtAST::Block { body } => self.interp_block(body, fsa),
-            StmtAST::Assign { var, expr, .. } => Some(self.interp_assign(*var, expr, fsa)),
-            StmtAST::Store { pointer, expr, .. } => Some(self.interp_store(pointer, expr, fsa)),
-            StmtAST::Call {
+            ImpStmt::Block { body } => self.interp_block(body, fsa),
+            ImpStmt::Assign { var, expr, .. } => Some(self.interp_assign(*var, expr, fsa)),
+            ImpStmt::Store { pointer, expr, .. } => Some(self.interp_store(pointer, expr, fsa)),
+            ImpStmt::Call {
                 vars,
                 callee,
                 args,
                 label,
             } => self.interp_call(vars, *callee, args, *label, fsa),
-            StmtAST::IfElse {
+            ImpStmt::IfElse {
                 cond,
                 then_body,
                 else_body,
                 ..
             } => self.interp_ifelse(cond, then_body, else_body, fsa),
-            StmtAST::While { cond, body, .. } => self.interp_while(cond, body, fsa),
-            StmtAST::Return { exprs, .. } => {
+            ImpStmt::While { cond, body, .. } => self.interp_while(cond, body, fsa),
+            ImpStmt::Return { exprs, .. } => {
                 self.interp_return(exprs, fsa);
                 None
             }
         }
     }
 
-    fn interp_block<'b>(&mut self, body: &'a Vec<StmtAST>, mut fsa: FSA<'b>) -> Option<FSA<'b>> {
+    fn interp_block<'b>(&mut self, body: &'a Vec<ImpStmt>, mut fsa: FSA<'b>) -> Option<FSA<'b>> {
         for stmt in body {
             if let Some(new_fsa) = self.interp_stmt(stmt, fsa) {
                 fsa = new_fsa
@@ -158,21 +159,18 @@ impl<'a> FIA<'a> {
         Some(fsa)
     }
 
-    fn interp_assign<'b>(&mut self, var: Symbol, expr: &'a ExprAST, mut fsa: FSA<'b>) -> FSA<'b> {
+    fn interp_assign<'b>(&mut self, var: Symbol, expr: &'a Expr, mut fsa: FSA<'b>) -> FSA<'b> {
         let value = self.interp_expr(expr, &fsa);
         fsa.vars.insert(var, value);
         fsa
     }
 
-    fn interp_store<'b>(
-        &mut self,
-        pointer: &'a ExprAST,
-        expr: &'a ExprAST,
-        mut fsa: FSA<'b>,
-    ) -> FSA<'b> {
+    fn interp_store<'b>(&mut self, pointer: &'a Expr, expr: &'a Expr, mut fsa: FSA<'b>) -> FSA<'b> {
         let pointer = self.interp_expr(pointer, &fsa);
         let expr = self.interp_expr(expr, &fsa);
-        let store = self.ssa.add_block(Block::Store(fsa.block, pointer, expr));
+        let store = self
+            .ssa
+            .add_block(SSABlock::Store(fsa.block, pointer, expr));
         fsa.block = store;
         fsa
     }
@@ -181,7 +179,7 @@ impl<'a> FIA<'a> {
         &mut self,
         vars: &'a Vec<Symbol>,
         callee: Symbol,
-        args: &'a Vec<ExprAST>,
+        args: &'a Vec<Expr>,
         label: LabelId,
         mut fsa: FSA<'b>,
     ) -> Option<FSA<'b>> {
@@ -239,7 +237,7 @@ impl<'a> FIA<'a> {
             }
 
             if let Some(output_analyses) = self.callgraph.output_analyses.get(&callee) {
-                fsa.block = self.ssa.add_block(Block::Call(fsa.block, callee, args));
+                fsa.block = self.ssa.add_block(SSABlock::Call(fsa.block, callee, args));
                 (0..vars.len())
                     .map(|idx| {
                         let call = self.ssa.intern_call(fsa.block, idx, output_analyses[idx]);
@@ -259,9 +257,9 @@ impl<'a> FIA<'a> {
 
     fn interp_ifelse<'b>(
         &mut self,
-        cond: &'a ExprAST,
-        then_body: &'a StmtAST,
-        else_body: &'a StmtAST,
+        cond: &'a Expr,
+        then_body: &'a ImpStmt,
+        else_body: &'a ImpStmt,
         mut fsa: FSA<'b>,
     ) -> Option<FSA<'b>> {
         let then_cond = self.interp_expr(cond, &fsa);
@@ -274,7 +272,7 @@ impl<'a> FIA<'a> {
             let then_block = if else_always_false {
                 fsa.block
             } else {
-                self.ssa.add_block(Block::Child(fsa.block, then_cond))
+                self.ssa.add_block(SSABlock::Child(fsa.block, then_cond))
             };
             let mut ctx = fsa.clone();
             ctx.block = then_block;
@@ -286,7 +284,7 @@ impl<'a> FIA<'a> {
             let else_block = if then_always_false {
                 fsa.block
             } else {
-                self.ssa.add_block(Block::Child(fsa.block, else_cond))
+                self.ssa.add_block(SSABlock::Child(fsa.block, else_cond))
             };
             let mut ctx = fsa.clone();
             ctx.block = else_block;
@@ -297,7 +295,7 @@ impl<'a> FIA<'a> {
             (Some(then_fsa), Some(else_fsa)) => {
                 let merge = self
                     .ssa
-                    .add_block(Block::Merge(then_fsa.block, else_fsa.block));
+                    .add_block(SSABlock::Merge(then_fsa.block, else_fsa.block));
                 for (var, then_value) in &then_fsa.vars {
                     if let Some(else_value) = else_fsa.vars.get(var) {
                         let value = if then_value == else_value {
@@ -321,8 +319,8 @@ impl<'a> FIA<'a> {
 
     fn interp_while<'b>(
         &mut self,
-        cond: &'a ExprAST,
-        body: &'a StmtAST,
+        cond: &'a Expr,
+        body: &'a ImpStmt,
         mut fsa: FSA<'b>,
     ) -> Option<FSA<'b>> {
         let mut then_cond = self.interp_expr(cond, &fsa);
@@ -332,10 +330,10 @@ impl<'a> FIA<'a> {
 
         let mut header = fsa.block;
         let mut loop_fsa = fsa.clone();
-        loop_fsa.block = self.ssa.add_block(Block::Child(header, then_cond));
+        loop_fsa.block = self.ssa.add_block(SSABlock::Child(header, then_cond));
 
         if let Some(mut loop_fsa) = self.interp_stmt(body, loop_fsa) {
-            header = self.ssa.add_block(Block::Entry);
+            header = self.ssa.add_block(SSABlock::Entry);
             let mut old_header_values = FxHashMap::default();
             let mut old_loop_analyses: FxHashMap<Symbol, Interval> = FxHashMap::default();
             loop {
@@ -362,7 +360,7 @@ impl<'a> FIA<'a> {
                 if new_vars == old_header_values {
                     fsa.vars = new_vars;
                     self.ssa
-                        .set_block(Block::Merge(fsa.block, loop_fsa.block), header);
+                        .set_block(SSABlock::Merge(fsa.block, loop_fsa.block), header);
                     break;
                 }
                 old_header_values = new_vars.clone();
@@ -370,7 +368,7 @@ impl<'a> FIA<'a> {
                 let mut new_loop_fsa = fsa.clone();
                 new_loop_fsa.vars = new_vars;
                 then_cond = self.interp_expr(cond, &new_loop_fsa);
-                new_loop_fsa.block = self.ssa.add_block(Block::Child(header, then_cond));
+                new_loop_fsa.block = self.ssa.add_block(SSABlock::Child(header, then_cond));
                 loop_fsa = self.interp_stmt(body, new_loop_fsa).unwrap();
             }
         }
@@ -379,12 +377,12 @@ impl<'a> FIA<'a> {
         if self.is_always_false(else_cond) {
             None
         } else {
-            fsa.block = self.ssa.add_block(Block::Child(header, else_cond));
+            fsa.block = self.ssa.add_block(SSABlock::Child(header, else_cond));
             Some(fsa)
         }
     }
 
-    fn interp_return<'b>(&mut self, exprs: &'a Vec<ExprAST>, fsa: FSA<'b>) {
+    fn interp_return<'b>(&mut self, exprs: &'a Vec<Expr>, fsa: FSA<'b>) {
         let values: Vec<_> = exprs
             .iter()
             .map(|expr| self.interp_expr(expr, &fsa))
@@ -392,20 +390,20 @@ impl<'a> FIA<'a> {
         fsa.returned.borrow_mut().insert((fsa.block, values));
     }
 
-    fn interp_expr<'b>(&mut self, expr: &'a ExprAST, fsa: &FSA<'b>) -> Id {
+    fn interp_expr<'b>(&mut self, expr: &'a Expr, fsa: &FSA<'b>) -> Id {
         match expr {
-            ExprAST::Number(cons) => self.ssa.add_data(Dataflow::Constant(*cons)),
-            ExprAST::Variable(var) => fsa.vars[var],
-            ExprAST::Unary { op, input } => {
+            Expr::Number(cons) => self.ssa.add_data(Dataflow::Constant(*cons)),
+            Expr::Variable(var) => fsa.vars[var],
+            Expr::Unary { op, input } => {
                 let input = self.interp_expr(input, fsa);
                 self.ssa.add_data(Dataflow::Unary(*op, input))
             }
-            ExprAST::Binary { op, lhs, rhs } => {
+            Expr::Binary { op, lhs, rhs } => {
                 let lhs = self.interp_expr(lhs, fsa);
                 let rhs = self.interp_expr(rhs, fsa);
                 self.ssa.add_data(Dataflow::Binary(*op, [lhs, rhs]))
             }
-            ExprAST::Load { pointer } => {
+            Expr::Load { pointer } => {
                 let pointer = self.interp_expr(pointer, fsa);
                 self.ssa.add_data(Dataflow::Load(fsa.block, pointer))
             }

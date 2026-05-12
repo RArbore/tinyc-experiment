@@ -3,59 +3,59 @@ use core::str::FromStr;
 use egg::Symbol;
 use rustc_hash::FxHashMap;
 
-use crate::imp::ast::*;
-use crate::ssa::{BinaryOp, UnaryOp};
+use crate::imp::ast::{ImpFunc, ImpStmt, LabelId, inc_label};
+use crate::nonssa::{BinaryOp, Expr, UnaryOp};
 
 grammar(counter: &mut LabelId);
 
-pub Program: FxHashMap<Symbol, FuncAST> = {
+pub Program: FxHashMap<Symbol, ImpFunc> = {
     Func* => <>.into_iter().collect(),
 }
 
-Func: (Symbol, FuncAST) = {
-    "fn" <name:Iden> "(" <params:List<Iden>> ")" <body:Stmt> => (name, FuncAST { name: name, params, body }),
+Func: (Symbol, ImpFunc) = {
+    "fn" <name:Iden> "(" <params:List<Iden>> ")" <body:Stmt> => (name, ImpFunc { name: name, params, body }),
 }
 
-Stmt: StmtAST = {
+Stmt: ImpStmt = {
     Block => <>,
-    <var:Iden> "=" <expr:BinaryExpr> ";" => StmtAST::Assign { var, expr, label: inc_label(counter) },
-    "*" <pointer:BinaryExpr> "=" <expr:BinaryExpr> ";" => StmtAST::Store { pointer, expr, label: inc_label(counter) },
-    <vars:List<Iden>> "<-" <callee:Iden> "(" <args:List<BinaryExpr>> ")" ";" => StmtAST::Call { vars, callee, args, label: inc_label(counter) },
-    <callee:Iden> "(" <args:List<BinaryExpr>> ")" ";" => StmtAST::Call { vars: vec![], callee, args, label: inc_label(counter) },
-    "if" <cond:BinaryExpr> <then_body:Block> <else_body:("else" <Block>)?> => StmtAST::IfElse { cond, then_body: Box::new(then_body), else_body: Box::new(else_body.unwrap_or_else(|| StmtAST::Block { body: vec![] })), merge: inc_label(counter) },
-    "while" <cond:BinaryExpr> <body:Block> => StmtAST::While { cond, body: Box::new(body), header: inc_label(counter), exit: inc_label(counter) },
-    "return" <exprs:List<BinaryExpr>> ";" => StmtAST::Return { exprs, label: inc_label(counter) },
+    <var:Iden> "=" <expr:BinaryExpr> ";" => ImpStmt::Assign { var, expr, label: inc_label(counter) },
+    "*" <pointer:BinaryExpr> "=" <expr:BinaryExpr> ";" => ImpStmt::Store { pointer, expr, label: inc_label(counter) },
+    <vars:List<Iden>> "<-" <callee:Iden> "(" <args:List<BinaryExpr>> ")" ";" => ImpStmt::Call { vars, callee, args, label: inc_label(counter) },
+    <callee:Iden> "(" <args:List<BinaryExpr>> ")" ";" => ImpStmt::Call { vars: vec![], callee, args, label: inc_label(counter) },
+    "if" <cond:BinaryExpr> <then_body:Block> <else_body:("else" <Block>)?> => ImpStmt::IfElse { cond, then_body: Box::new(then_body), else_body: Box::new(else_body.unwrap_or_else(|| ImpStmt::Block { body: vec![] })), merge: inc_label(counter) },
+    "while" <cond:BinaryExpr> <body:Block> => ImpStmt::While { cond, body: Box::new(body), header: inc_label(counter), exit: inc_label(counter) },
+    "return" <exprs:List<BinaryExpr>> ";" => ImpStmt::Return { exprs, label: inc_label(counter) },
 }
 
-Block: StmtAST = "{" <body:Stmt*> "}" => StmtAST::Block { body };
+Block: ImpStmt = "{" <body:Stmt*> "}" => ImpStmt::Block { body };
 
-BinaryExpr: ExprAST = {
+BinaryExpr: Expr = {
     #[precedence(level="0")]
     UnaryExpr,
     #[precedence(level="1")] #[assoc(side="left")]
-    <lhs:BinaryExpr> "*" <rhs:BinaryExpr> => ExprAST::Binary { op: BinaryOp::Mul, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+    <lhs:BinaryExpr> "*" <rhs:BinaryExpr> => Expr::Binary { op: BinaryOp::Mul, lhs: Box::new(lhs), rhs: Box::new(rhs) },
     #[precedence(level="2")] #[assoc(side="left")]
-    <lhs:BinaryExpr> "+" <rhs:BinaryExpr> => ExprAST::Binary { op: BinaryOp::Add, lhs: Box::new(lhs), rhs: Box::new(rhs) },
-    <lhs:BinaryExpr> "-" <rhs:BinaryExpr> => ExprAST::Binary { op: BinaryOp::Sub, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+    <lhs:BinaryExpr> "+" <rhs:BinaryExpr> => Expr::Binary { op: BinaryOp::Add, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+    <lhs:BinaryExpr> "-" <rhs:BinaryExpr> => Expr::Binary { op: BinaryOp::Sub, lhs: Box::new(lhs), rhs: Box::new(rhs) },
     #[precedence(level="3")] #[assoc(side="left")]
-    <lhs:BinaryExpr> "==" <rhs:BinaryExpr> => ExprAST::Binary { op: BinaryOp::EE, lhs: Box::new(lhs), rhs: Box::new(rhs) },
-    <lhs:BinaryExpr> "!=" <rhs:BinaryExpr> => ExprAST::Binary { op: BinaryOp::NE, lhs: Box::new(lhs), rhs: Box::new(rhs) },
-    <lhs:BinaryExpr> "<" <rhs:BinaryExpr> => ExprAST::Binary { op: BinaryOp::LT, lhs: Box::new(lhs), rhs: Box::new(rhs) },
-    <lhs:BinaryExpr> "<=" <rhs:BinaryExpr> => ExprAST::Binary { op: BinaryOp::LE, lhs: Box::new(lhs), rhs: Box::new(rhs) },
-    <lhs:BinaryExpr> ">" <rhs:BinaryExpr> => ExprAST::Binary { op: BinaryOp::GT, lhs: Box::new(lhs), rhs: Box::new(rhs) },
-    <lhs:BinaryExpr> ">=" <rhs:BinaryExpr> => ExprAST::Binary { op: BinaryOp::GE, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+    <lhs:BinaryExpr> "==" <rhs:BinaryExpr> => Expr::Binary { op: BinaryOp::EE, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+    <lhs:BinaryExpr> "!=" <rhs:BinaryExpr> => Expr::Binary { op: BinaryOp::NE, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+    <lhs:BinaryExpr> "<" <rhs:BinaryExpr> => Expr::Binary { op: BinaryOp::LT, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+    <lhs:BinaryExpr> "<=" <rhs:BinaryExpr> => Expr::Binary { op: BinaryOp::LE, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+    <lhs:BinaryExpr> ">" <rhs:BinaryExpr> => Expr::Binary { op: BinaryOp::GT, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+    <lhs:BinaryExpr> ">=" <rhs:BinaryExpr> => Expr::Binary { op: BinaryOp::GE, lhs: Box::new(lhs), rhs: Box::new(rhs) },
 }
 
-UnaryExpr: ExprAST = {
+UnaryExpr: Expr = {
     Atomic,
-    "!" <UnaryExpr> => ExprAST::Unary { op: UnaryOp::Not, input: Box::new(<>) },
-    "-" <UnaryExpr> => ExprAST::Unary { op: UnaryOp::Neg, input: Box::new(<>) },
-    "*" <UnaryExpr> => ExprAST::Load { pointer: Box::new(<>) },
+    "!" <UnaryExpr> => Expr::Unary { op: UnaryOp::Not, input: Box::new(<>) },
+    "-" <UnaryExpr> => Expr::Unary { op: UnaryOp::Neg, input: Box::new(<>) },
+    "*" <UnaryExpr> => Expr::Load { pointer: Box::new(<>) },
 }
 
-Atomic: ExprAST = {
-    Num => ExprAST::Number(<>),
-    Iden => ExprAST::Variable(<>),
+Atomic: Expr = {
+    Num => Expr::Number(<>),
+    Iden => Expr::Variable(<>),
     "(" <BinaryExpr> ")",
 }
 

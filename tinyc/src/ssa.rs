@@ -1,30 +1,11 @@
 use core::cmp::max;
 use core::fmt::{Display, Formatter, Result};
 
-use derive_more::FromStr;
 use egg::{EGraph, Id, Symbol, define_language};
 use rustc_hash::FxHashMap;
 
 use crate::analysis::interval::{Interval, IntervalAnalysis};
-
-#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash, FromStr)]
-pub enum UnaryOp {
-    Neg,
-    Not,
-}
-
-#[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash, FromStr)]
-pub enum BinaryOp {
-    Add,
-    Sub,
-    Mul,
-    EE,
-    NE,
-    LT,
-    LE,
-    GT,
-    GE,
-}
+use crate::nonssa::{BinaryOp, UnaryOp};
 
 pub type BlockId = usize;
 pub type ParamId = usize;
@@ -45,7 +26,7 @@ define_language! {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Block {
+pub enum SSABlock {
     Entry,
     Child(BlockId, Id),
     Merge(BlockId, BlockId),
@@ -57,7 +38,7 @@ pub enum Block {
 #[derive(Debug, Default)]
 pub struct SSAProgram {
     pub dfg: EGraph<Dataflow, IntervalAnalysis>,
-    pub cfg: Vec<Block>,
+    pub cfg: Vec<SSABlock>,
     pub entries: FxHashMap<Symbol, BlockId>,
 
     // Intern tuples of function name, parameter index, and analysis to ParamId.
@@ -73,13 +54,13 @@ impl SSAProgram {
         self.dfg.add(data)
     }
 
-    pub fn add_block(&mut self, block: Block) -> BlockId {
+    pub fn add_block(&mut self, block: SSABlock) -> BlockId {
         let id = self.cfg.len();
         self.cfg.push(block);
         id
     }
 
-    pub fn set_block(&mut self, block: Block, id: BlockId) {
+    pub fn set_block(&mut self, block: SSABlock, id: BlockId) {
         self.cfg[id] = block;
     }
 
@@ -100,13 +81,13 @@ impl SSAProgram {
     pub fn canon_cfg(&mut self) {
         for block in &mut self.cfg {
             match block {
-                Block::Entry | Block::Merge(_, _) => {}
-                Block::Child(_, cond) => *cond = self.dfg.find(*cond),
-                Block::Store(_, ptr, value) => {
+                SSABlock::Entry | SSABlock::Merge(_, _) => {}
+                SSABlock::Child(_, cond) => *cond = self.dfg.find(*cond),
+                SSABlock::Store(_, ptr, value) => {
                     *ptr = self.dfg.find(*ptr);
                     *value = self.dfg.find(*value);
                 }
-                Block::Call(_, _, ids) | Block::Return(_, ids) => {
+                SSABlock::Call(_, _, ids) | SSABlock::Return(_, ids) => {
                     ids.iter_mut().for_each(|id| *id = self.dfg.find(*id))
                 }
             }

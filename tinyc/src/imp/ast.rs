@@ -2,7 +2,7 @@ use core::fmt::{Display, Formatter, Result};
 
 use egg::Symbol;
 
-use crate::ssa::{BinaryOp, UnaryOp};
+use crate::nonssa::Expr;
 
 pub type LabelId = usize;
 pub fn inc_label(counter: &mut LabelId) -> LabelId {
@@ -12,70 +12,52 @@ pub fn inc_label(counter: &mut LabelId) -> LabelId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FuncAST {
+pub struct ImpFunc {
     pub name: Symbol,
     pub params: Vec<Symbol>,
-    pub body: StmtAST,
+    pub body: ImpStmt,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StmtAST {
+pub enum ImpStmt {
     Block {
-        body: Vec<StmtAST>,
+        body: Vec<ImpStmt>,
     },
     Assign {
         var: Symbol,
-        expr: ExprAST,
+        expr: Expr,
         label: LabelId,
     },
     Store {
-        pointer: ExprAST,
-        expr: ExprAST,
+        pointer: Expr,
+        expr: Expr,
         label: LabelId,
     },
     Call {
         vars: Vec<Symbol>,
         callee: Symbol,
-        args: Vec<ExprAST>,
+        args: Vec<Expr>,
         label: LabelId,
     },
     IfElse {
-        cond: ExprAST,
-        then_body: Box<StmtAST>,
-        else_body: Box<StmtAST>,
+        cond: Expr,
+        then_body: Box<ImpStmt>,
+        else_body: Box<ImpStmt>,
         merge: LabelId,
     },
     While {
-        cond: ExprAST,
-        body: Box<StmtAST>,
+        cond: Expr,
+        body: Box<ImpStmt>,
         header: LabelId,
         exit: LabelId,
     },
     Return {
-        exprs: Vec<ExprAST>,
+        exprs: Vec<Expr>,
         label: LabelId,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExprAST {
-    Number(i64),
-    Variable(Symbol),
-    Unary {
-        op: UnaryOp,
-        input: Box<ExprAST>,
-    },
-    Binary {
-        op: BinaryOp,
-        lhs: Box<ExprAST>,
-        rhs: Box<ExprAST>,
-    },
-    Load {
-        pointer: Box<ExprAST>,
-    },
-}
-
-impl Display for FuncAST {
+impl Display for ImpFunc {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         write!(f, "fn {}(", self.name.as_str())?;
         for idx in 0..self.params.len() {
@@ -88,10 +70,10 @@ impl Display for FuncAST {
     }
 }
 
-impl Display for StmtAST {
+impl Display for ImpStmt {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         match self {
-            StmtAST::Block { body } => {
+            ImpStmt::Block { body } => {
                 write!(f, "{{ ")?;
                 for stmt in body {
                     stmt.fmt(f)?;
@@ -99,9 +81,9 @@ impl Display for StmtAST {
                 }
                 write!(f, "}}")
             }
-            StmtAST::Assign { var, expr, .. } => write!(f, "{} = {};", var.as_str(), expr),
-            StmtAST::Store { pointer, expr, .. } => write!(f, "*{} = {};", pointer, expr),
-            StmtAST::Call {
+            ImpStmt::Assign { var, expr, .. } => write!(f, "{} = {};", var.as_str(), expr),
+            ImpStmt::Store { pointer, expr, .. } => write!(f, "*{} = {};", pointer, expr),
+            ImpStmt::Call {
                 vars, callee, args, ..
             } => {
                 for idx in 0..vars.len() {
@@ -119,7 +101,7 @@ impl Display for StmtAST {
                 }
                 write!(f, ");")
             }
-            StmtAST::IfElse {
+            ImpStmt::IfElse {
                 cond,
                 then_body,
                 else_body,
@@ -131,8 +113,8 @@ impl Display for StmtAST {
                     cond, then_body, else_body
                 )
             }
-            StmtAST::While { cond, body, .. } => write!(f, "while {} {{ {} }}", cond, body),
-            StmtAST::Return { exprs: expr, .. } => {
+            ImpStmt::While { cond, body, .. } => write!(f, "while {} {{ {} }}", cond, body),
+            ImpStmt::Return { exprs: expr, .. } => {
                 write!(f, "return ")?;
                 for idx in 0..expr.len() {
                     if idx != 0 {
@@ -146,47 +128,10 @@ impl Display for StmtAST {
     }
 }
 
-impl Display for ExprAST {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        match self {
-            ExprAST::Number(num) => num.fmt(f),
-            ExprAST::Variable(name) => name.as_str().fmt(f),
-            ExprAST::Unary { op, input } => write!(f, "{}{}", op, input),
-            ExprAST::Binary { op, lhs, rhs } => write!(f, "({} {} {})", lhs, op, rhs),
-            ExprAST::Load { pointer } => write!(f, "*{}", pointer),
-        }
-    }
-}
-
-impl Display for UnaryOp {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        match self {
-            UnaryOp::Neg => "-".fmt(f),
-            UnaryOp::Not => "!".fmt(f),
-        }
-    }
-}
-
-impl Display for BinaryOp {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        match self {
-            BinaryOp::Add => "+".fmt(f),
-            BinaryOp::Sub => "-".fmt(f),
-            BinaryOp::Mul => "*".fmt(f),
-            BinaryOp::EE => "==".fmt(f),
-            BinaryOp::NE => "!=".fmt(f),
-            BinaryOp::LT => "<".fmt(f),
-            BinaryOp::LE => "<=".fmt(f),
-            BinaryOp::GT => ">".fmt(f),
-            BinaryOp::GE => ">=".fmt(f),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use egg::Symbol;
-    
+
     use crate::imp::grammar::ProgramParser;
 
     #[test]
@@ -197,7 +142,10 @@ fn test2(y) { *y = 3; y <- test1(y); return y, *y + 1; }
 "#;
         let mut counter = 0;
         let parsed = ProgramParser::new().parse(&mut counter, &program).unwrap();
-        assert_eq!(format!("{}", parsed[&Symbol::from("test1")]), "fn test1(x) return x;");
+        assert_eq!(
+            format!("{}", parsed[&Symbol::from("test1")]),
+            "fn test1(x) return x;"
+        );
         assert_eq!(
             format!("{}", parsed[&Symbol::from("test2")]),
             "fn test2(y) { *y = 3; y <- test1(y); return y, (*y + 1); }"
