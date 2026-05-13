@@ -1,3 +1,5 @@
+use core::iter::zip;
+
 use egg::{Id, Symbol};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -12,7 +14,9 @@ pub fn create_ssa(nonssa: &FxHashMap<Symbol, NonSSAFunc>) -> SSAProgram {
         ssa: Default::default(),
         states: Default::default(),
         created_ssa_blocks: Default::default(),
-        callers: Default::default(),
+        callers: FxHashMap::from_iter([("main".into(), FxHashSet::default())]),
+        input_analysis: FxHashMap::from_iter([("main".into(), vec![])]),
+        output_analysis: Default::default(),
         to_visit: vec![("main".into(), 0)],
     };
 
@@ -31,7 +35,10 @@ struct AIContext {
 
     states: FxHashMap<(Symbol, BlockId), AIState>,
     created_ssa_blocks: FxHashMap<(Symbol, BlockId), SSABlockId>,
-    callers: FxHashMap<Symbol, FxHashMap<(Symbol, BlockId), Vec<Id>>>,
+
+    callers: FxHashMap<Symbol, FxHashSet<Symbol>>,
+    input_analysis: FxHashMap<Symbol, Vec<Interval>>,
+    output_analysis: FxHashMap<Symbol, Vec<Interval>>,
 
     to_visit: Vec<(Symbol, BlockId)>,
 }
@@ -95,12 +102,13 @@ impl AIContext {
         func: Symbol,
         block: BlockId,
     ) {
+        let input_analysis = &self.input_analysis[&func];
         let vars = nonssa[&func]
             .params
             .iter()
             .enumerate()
             .map(|(idx, param)| {
-                let param_id = self.ssa.intern_param(func, idx, Interval::top());
+                let param_id = self.ssa.intern_param(func, idx, input_analysis[idx]);
                 (*param, self.ssa.add_data(Dataflow::Param(param_id)))
             })
             .collect();
@@ -206,32 +214,78 @@ impl AIContext {
                 .iter()
                 .map(|expr| self.add_expr(expr, &state))
                 .collect();
-            let callers = self.callers.entry(callee).or_default();
-            if callers.is_empty() {
+            let mut changed = false;
+            if let Some(input_analysis) = self.input_analysis.get_mut(&callee) {
+                for (old_analysis, arg_value) in zip(input_analysis.iter_mut(), &arg_values) {
+                    let joined = old_analysis.join(&self.ssa.analysis(*arg_value));
+                    if *old_analysis != joined {
+                        *old_analysis = joined;
+                        changed = true;
+                    }
+                }
+            } else {
+                self.input_analysis.insert(
+                    callee,
+                    arg_values
+                        .iter()
+                        .map(|arg_value| self.ssa.analysis(*arg_value))
+                        .collect(),
+                );
+                changed = true;
+            }
+            if changed {
                 self.to_visit.push((callee, 0));
             }
-            callers.insert((func, block), arg_values.clone());
+            self.callers.entry(callee).or_default().insert(func);
 
-            state.ssa_block = self.set_block(
-                func,
-                block,
-                SSABlock::Call(state.ssa_block, callee, arg_values),
-            );
-            for (idx, var) in vars.iter().enumerate() {
-                let call = self.ssa.intern_call(state.ssa_block, idx, Interval::top());
-                let call = self.ssa.add_data(Dataflow::Call(call));
-                state.vars.insert(*var, call);
+            if let Some(output_analysis) = self.output_analysis.get(&callee).cloned() {
+                state.ssa_block = self.set_block(
+                    func,
+                    block,
+                    SSABlock::Call(state.ssa_block, callee, arg_values),
+                );
+                for (idx, var) in vars.iter().enumerate() {
+                    let call = self
+                        .ssa
+                        .intern_call(state.ssa_block, idx, output_analysis[idx]);
+                    let call = self.ssa.add_data(Dataflow::Call(call));
+                    state.vars.insert(*var, call);
+                }
+                self.update_state(func, block, state);
             }
-            self.update_state(func, block, state);
         }
     }
 
     fn visit_return(&mut self, func: Symbol, block: BlockId, pred: BlockId, exprs: &Vec<Expr>) {
         if let Some(mut state) = self.states.get(&(func, pred)).cloned() {
-            let values = exprs
+            let values: Vec<_> = exprs
                 .iter()
                 .map(|expr| self.add_expr(expr, &state))
                 .collect();
+            let mut changed = false;
+            if let Some(output_analysis) = self.output_analysis.get_mut(&func) {
+                for (old_analysis, value) in zip(output_analysis.iter_mut(), &values) {
+                    let new_analysis = self.ssa.analysis(*value);
+                    if *old_analysis != new_analysis {
+                        *old_analysis = new_analysis;
+                        changed = true;
+                    }
+                }
+            } else {
+                self.output_analysis.insert(
+                    func,
+                    values
+                        .iter()
+                        .map(|value| self.ssa.analysis(*value))
+                        .collect(),
+                );
+                changed = true;
+            }
+            if changed {
+                self.to_visit
+                    .extend(self.callers[&func].iter().map(|caller| (*caller, 0)));
+            }
+
             state.ssa_block =
                 self.set_block(func, block, SSABlock::Return(state.ssa_block, values));
             self.update_state(func, block, state);
