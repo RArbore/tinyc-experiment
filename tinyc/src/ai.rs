@@ -36,7 +36,7 @@ struct AIContext {
     states: FxHashMap<(Symbol, BlockId), AIState>,
     created_ssa_blocks: FxHashMap<(Symbol, BlockId), SSABlockId>,
 
-    callers: FxHashMap<Symbol, FxHashSet<Symbol>>,
+    callers: FxHashMap<Symbol, FxHashSet<(Symbol, BlockId)>>,
     input_analysis: FxHashMap<Symbol, Vec<Interval>>,
     output_analysis: FxHashMap<Symbol, Vec<Interval>>,
 
@@ -162,7 +162,8 @@ impl AIContext {
                         if value1 == value2 {
                             new_vars.insert(*var, *value1);
                         } else {
-                            let joined = self.ssa.analysis(*value1).join(&self.ssa.analysis(*value2));
+                            let joined =
+                                self.ssa.analysis(*value1).join(&self.ssa.analysis(*value2));
                             let knot = self.ssa.intern_knot(ssa_block, *var, joined);
                             let knot = self.ssa.add_data(Dataflow::Knot(knot));
                             new_vars.insert(*var, knot);
@@ -237,14 +238,18 @@ impl AIContext {
             if changed {
                 self.to_visit.push((callee, 0));
             }
-            self.callers.entry(callee).or_default().insert(func);
+
+            state.ssa_block = self.set_block(
+                func,
+                block,
+                SSABlock::Call(state.ssa_block, callee, arg_values),
+            );
+            self.callers
+                .entry(callee)
+                .or_default()
+                .insert((func, state.ssa_block));
 
             if let Some(output_analysis) = self.output_analysis.get(&callee).cloned() {
-                state.ssa_block = self.set_block(
-                    func,
-                    block,
-                    SSABlock::Call(state.ssa_block, callee, arg_values),
-                );
                 for (idx, var) in vars.iter().enumerate() {
                     let call = self
                         .ssa
@@ -283,8 +288,7 @@ impl AIContext {
                 changed = true;
             }
             if changed {
-                self.to_visit
-                    .extend(self.callers[&func].iter().map(|caller| (*caller, 0)));
+                self.to_visit.extend(self.callers[&func].iter().copied());
             }
 
             state.ssa_block =
