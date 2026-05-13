@@ -1,5 +1,3 @@
-use core::mem::take;
-
 use egg::{Id, Symbol};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -13,13 +11,13 @@ pub fn create_ssa(nonssa: &FxHashMap<Symbol, NonSSAFunc>) -> SSAProgram {
         deps,
         ssa: Default::default(),
         states: Default::default(),
-        to_visit: FxHashSet::from_iter([("main".into(), 0)]),
+        created_ssa_blocks: Default::default(),
+        callers: Default::default(),
+        to_visit: vec![("main".into(), 0)],
     };
 
-    while !context.to_visit.is_empty() {
-        for (func, block) in take(&mut context.to_visit) {
-            context.visit_block(&nonssa, func, block);
-        }
+    while let Some((func, block)) = context.to_visit.pop() {
+        context.visit_block(&nonssa, func, block);
     }
 
     context.ssa.canon_cfg();
@@ -32,8 +30,10 @@ struct AIContext {
     ssa: SSAProgram,
 
     states: FxHashMap<(Symbol, BlockId), AIState>,
+    created_ssa_blocks: FxHashMap<(Symbol, BlockId), SSABlockId>,
+    callers: FxHashMap<Symbol, FxHashMap<(Symbol, BlockId), Vec<Id>>>,
 
-    to_visit: FxHashSet<(Symbol, BlockId)>,
+    to_visit: Vec<(Symbol, BlockId)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,17 +43,14 @@ struct AIState {
 }
 
 impl AIContext {
-    fn try_old_ssa_block(&self, func: Symbol, block: BlockId) -> Option<SSABlockId> {
-        self.states.get(&(func, block)).map(|state| state.ssa_block)
-    }
-
     fn set_block(&mut self, func: Symbol, block: BlockId, ssa_block: SSABlock) -> SSABlockId {
-        if let Some(old_ssa_block) = self.try_old_ssa_block(func, block) {
+        if let Some(old_ssa_block) = self.created_ssa_blocks.get(&(func, block)).copied() {
             self.ssa.cfg[old_ssa_block] = ssa_block;
             old_ssa_block
         } else {
             let id = self.ssa.cfg.len();
             self.ssa.cfg.push(ssa_block);
+            self.created_ssa_blocks.insert((func, block), id);
             id
         }
     }
@@ -205,10 +202,16 @@ impl AIContext {
         args: &Vec<Expr>,
     ) {
         if let Some(mut state) = self.states.get(&(func, pred)).cloned() {
-            let arg_values = args
+            let arg_values: Vec<_> = args
                 .iter()
                 .map(|expr| self.add_expr(expr, &state))
                 .collect();
+            let callers = self.callers.entry(callee).or_default();
+            if callers.is_empty() {
+                self.to_visit.push((callee, 0));
+            }
+            callers.insert((func, block), arg_values.clone());
+
             state.ssa_block = self.set_block(
                 func,
                 block,
@@ -220,7 +223,6 @@ impl AIContext {
                 state.vars.insert(*var, call);
             }
             self.update_state(func, block, state);
-            self.to_visit.insert((callee, 0));
         }
     }
 
