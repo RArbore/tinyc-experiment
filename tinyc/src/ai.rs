@@ -1,3 +1,4 @@
+use core::hash::Hash;
 use core::iter::zip;
 
 use egg::{Id, Symbol};
@@ -19,6 +20,11 @@ pub fn create_ssa(nonssa: &FxHashMap<Symbol, NonSSAFunc>) -> SSAProgram {
         output_analysis: Default::default(),
         intraprocedural_block_deps: Default::default(),
         interprocedural_call_deps: Default::default(),
+        widening_ssa_blocks: Default::default(),
+        widening_funcs: Default::default(),
+        widening_ssa_blocks_dirty: false,
+        widening_funcs_dirty: false,
+        old_analysis_at_ssa_block: Default::default(),
         to_visit: vec![("main".into(), 0)],
     };
 
@@ -44,6 +50,11 @@ struct AIContext {
 
     intraprocedural_block_deps: FxHashMap<SSABlockId, FxHashSet<SSABlockId>>,
     interprocedural_call_deps: FxHashMap<Symbol, FxHashSet<Symbol>>,
+    widening_ssa_blocks: FxHashSet<SSABlockId>,
+    widening_funcs: FxHashSet<Symbol>,
+    widening_ssa_blocks_dirty: bool,
+    widening_funcs_dirty: bool,
+    old_analysis_at_ssa_block: FxHashMap<SSABlockId, FxHashMap<Symbol, Interval>>,
 
     to_visit: Vec<(Symbol, BlockId)>,
 }
@@ -70,18 +81,36 @@ impl AIContext {
         self.interprocedural_call_deps.entry(func).or_default();
         match self.ssa.cfg[id] {
             SSABlock::Entry => {}
-            SSABlock::Guard(pred, ..)
-            | SSABlock::Store(pred, ..)
-            | SSABlock::Return(pred, ..) => {
-                self.intraprocedural_block_deps.entry(pred).or_default().insert(id);
+            SSABlock::Guard(pred, ..) | SSABlock::Store(pred, ..) | SSABlock::Return(pred, ..) => {
+                self.widening_ssa_blocks_dirty |= self
+                    .intraprocedural_block_deps
+                    .entry(pred)
+                    .or_default()
+                    .insert(id);
             }
             SSABlock::Call(pred, callee, ..) => {
-                self.intraprocedural_block_deps.entry(pred).or_default().insert(id);
-                self.interprocedural_call_deps.entry(func).or_default().insert(callee);
+                self.widening_ssa_blocks_dirty |= self
+                    .intraprocedural_block_deps
+                    .entry(pred)
+                    .or_default()
+                    .insert(id);
+                self.widening_funcs_dirty |= self
+                    .interprocedural_call_deps
+                    .entry(func)
+                    .or_default()
+                    .insert(callee);
             }
             SSABlock::Merge(pred1, pred2) => {
-                self.intraprocedural_block_deps.entry(pred1).or_default().insert(id);
-                self.intraprocedural_block_deps.entry(pred2).or_default().insert(id);
+                self.widening_ssa_blocks_dirty |= self
+                    .intraprocedural_block_deps
+                    .entry(pred1)
+                    .or_default()
+                    .insert(id);
+                self.widening_ssa_blocks_dirty |= self
+                    .intraprocedural_block_deps
+                    .entry(pred2)
+                    .or_default()
+                    .insert(id);
             }
         }
 
@@ -99,6 +128,34 @@ impl AIContext {
             self.to_visit
                 .extend(self.deps[&func][&block].iter().map(|block| (func, *block)));
         }
+    }
+
+    fn is_widening_ssa_block(&mut self, id: SSABlockId) -> bool {
+        if self.widening_ssa_blocks_dirty {
+            let mut headers = Vec::from_iter(cycle_headers(
+                &self.intraprocedural_block_deps,
+                self.ssa.entries.values().copied(),
+            ));
+            while let Some(header) = headers.pop() {
+                match self.ssa.cfg[header] {
+                    SSABlock::Entry => panic!(),
+                    SSABlock::Guard(pred, ..) => headers.push(pred),
+                    SSABlock::Store(pred, ..) => headers.push(pred),
+                    SSABlock::Call(pred, ..) => headers.push(pred),
+                    SSABlock::Return(pred, ..) => headers.push(pred),
+                    SSABlock::Merge(..) => {
+                        self.widening_ssa_blocks.insert(header);
+                    }
+                }
+            }
+            self.widening_ssa_blocks.extend(headers);
+            self.widening_funcs_dirty = false;
+        }
+        self.widening_ssa_blocks.contains(&id)
+    }
+
+    fn is_widening_func(&mut self, func: Symbol) -> bool {
+        self.widening_funcs.contains(&func)
     }
 
     fn visit_block(
@@ -181,6 +238,7 @@ impl AIContext {
                     block,
                     SSABlock::Merge(state1.ssa_block, state2.ssa_block),
                 );
+                let is_widening = self.is_widening_ssa_block(ssa_block);
 
                 let mut new_vars = FxHashMap::default();
                 for (var, value1) in &state1.vars {
@@ -188,12 +246,27 @@ impl AIContext {
                         if value1 == value2 {
                             new_vars.insert(*var, *value1);
                         } else {
-                            let joined =
+                            let mut analysis =
                                 self.ssa.analysis(*value1).join(&self.ssa.analysis(*value2));
-                            let knot = self.ssa.intern_knot(ssa_block, *var, joined);
+                            if is_widening
+                                && let Some(old_analysis) =
+                                    self.old_analysis_at_ssa_block.get(&ssa_block)
+                            {
+                                analysis = old_analysis[var].widen(&analysis);
+                            }
+                            let knot = self.ssa.intern_knot(ssa_block, *var, analysis);
                             let knot = self.ssa.add_data(Dataflow::Knot(knot));
                             new_vars.insert(*var, knot);
                         }
+                    }
+                }
+
+                if is_widening {
+                    for (var, id) in &new_vars {
+                        self.old_analysis_at_ssa_block
+                            .entry(ssa_block)
+                            .or_default()
+                            .insert(*var, self.ssa.analysis(*id));
                     }
                 }
 
@@ -376,11 +449,92 @@ fn deps(
         .collect()
 }
 
+fn cycle_headers<T, I>(graph: &FxHashMap<T, FxHashSet<T>>, roots: I) -> FxHashSet<T>
+where
+    T: Copy + Eq + Hash,
+    I: Iterator<Item = T>,
+{
+    let mut headers = FxHashSet::default();
+    let mut visited = FxHashSet::default();
+    let order = dfs(graph, roots);
+    for node in order {
+        for succ in &graph[&node] {
+            if !visited.contains(succ) {
+                headers.insert(*succ);
+            }
+        }
+        visited.insert(node);
+    }
+    headers
+}
+
+fn dfs<T, I>(graph: &FxHashMap<T, FxHashSet<T>>, roots: I) -> Vec<T>
+where
+    T: Copy + Eq + Hash,
+    I: Iterator<Item = T>,
+{
+    let mut order = vec![];
+    let mut visited = FxHashSet::default();
+    for root in roots {
+        dfs_helper(graph, root, &mut order, &mut visited);
+    }
+    order
+}
+
+fn dfs_helper<T>(
+    graph: &FxHashMap<T, FxHashSet<T>>,
+    node: T,
+    order: &mut Vec<T>,
+    visited: &mut FxHashSet<T>,
+) where
+    T: Copy + Eq + Hash,
+{
+    if !visited.contains(&node) {
+        visited.insert(node);
+        for succ in &graph[&node] {
+            dfs_helper(graph, *succ, order, visited);
+        }
+        order.push(node);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use rustc_hash::{FxHashMap, FxHashSet};
+
     use crate::ai::create_ssa;
     use crate::imp::ast::convert_to_cfg;
     use crate::imp::grammar::ProgramParser;
+
+    use super::*;
+
+    #[test]
+    fn detect_no_cycle() {
+        let mut graph: FxHashMap<usize, FxHashSet<usize>> = FxHashMap::default();
+        graph.entry(0).or_default().insert(1);
+        graph.entry(0).or_default().insert(2);
+        graph.entry(1).or_default().insert(3);
+        graph.entry(2).or_default().insert(3);
+        graph.entry(3).or_default();
+        graph.entry(4).or_default().insert(5);
+        graph.entry(5).or_default();
+        let headers = cycle_headers(&graph, [0, 4].into_iter());
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn detect_cycle() {
+        let mut graph: FxHashMap<usize, FxHashSet<usize>> = FxHashMap::default();
+        graph.entry(0).or_default().insert(1);
+        graph.entry(0).or_default().insert(2);
+        graph.entry(1).or_default().insert(3);
+        graph.entry(2).or_default().insert(3);
+        graph.entry(3).or_default().insert(4);
+        graph.entry(4).or_default().insert(1);
+        let headers = cycle_headers(&graph, [0].into_iter());
+        assert_eq!(headers.len(), 1);
+        assert!(headers.contains(&1) || headers.contains(&3) || headers.contains(&4));
+    }
 
     #[test]
     fn translate1() {
@@ -393,7 +547,7 @@ fn foo(x, y) return x + y;
             .into_iter()
             .map(|(name, func)| (name, convert_to_cfg(func)))
             .collect();
-        let ssa = create_ssa(&nonssa);
+        let _ssa = create_ssa(&nonssa);
     }
 
     #[test]
@@ -407,7 +561,7 @@ fn foo(x) { x <- foo(x + 1); return x; }
             .into_iter()
             .map(|(name, func)| (name, convert_to_cfg(func)))
             .collect();
-        let ssa = create_ssa(&nonssa);
+        let _ssa = create_ssa(&nonssa);
     }
 
     #[test]
@@ -421,7 +575,7 @@ fn foo(x) { return x; }
             .into_iter()
             .map(|(name, func)| (name, convert_to_cfg(func)))
             .collect();
-        let ssa = create_ssa(&nonssa);
+        let _ssa = create_ssa(&nonssa);
     }
 
     #[test]
@@ -434,7 +588,7 @@ fn main() { x = 1; while x < 100 { x = x + (1 * 5); } return x; }
             .into_iter()
             .map(|(name, func)| (name, convert_to_cfg(func)))
             .collect();
-        let ssa = create_ssa(&nonssa);
+        let _ssa = create_ssa(&nonssa);
     }
 
     #[test]
@@ -449,7 +603,7 @@ fn baz() { return 42; }
             .into_iter()
             .map(|(name, func)| (name, convert_to_cfg(func)))
             .collect();
-        let ssa = create_ssa(&nonssa);
+        let _ssa = create_ssa(&nonssa);
     }
 
     #[test]
@@ -463,6 +617,6 @@ fn foo(x) { if x { x <- foo(x - 1); return x + 1; } else { return 0; } }
             .into_iter()
             .map(|(name, func)| (name, convert_to_cfg(func)))
             .collect();
-        let ssa = create_ssa(&nonssa);
+        let _ssa = create_ssa(&nonssa);
     }
 }
