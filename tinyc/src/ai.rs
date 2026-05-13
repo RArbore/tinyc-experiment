@@ -17,6 +17,8 @@ pub fn create_ssa(nonssa: &FxHashMap<Symbol, NonSSAFunc>) -> SSAProgram {
         callers: FxHashMap::from_iter([("main".into(), FxHashSet::default())]),
         input_analysis: FxHashMap::from_iter([("main".into(), vec![])]),
         output_analysis: Default::default(),
+        intraprocedural_block_deps: Default::default(),
+        interprocedural_call_deps: Default::default(),
         to_visit: vec![("main".into(), 0)],
     };
 
@@ -40,6 +42,9 @@ struct AIContext {
     input_analysis: FxHashMap<Symbol, Vec<Interval>>,
     output_analysis: FxHashMap<Symbol, Vec<Interval>>,
 
+    intraprocedural_block_deps: FxHashMap<SSABlockId, FxHashSet<SSABlockId>>,
+    interprocedural_call_deps: FxHashMap<Symbol, FxHashSet<Symbol>>,
+
     to_visit: Vec<(Symbol, BlockId)>,
 }
 
@@ -51,7 +56,7 @@ struct AIState {
 
 impl AIContext {
     fn set_block(&mut self, func: Symbol, block: BlockId, ssa_block: SSABlock) -> SSABlockId {
-        if let Some(old_ssa_block) = self.created_ssa_blocks.get(&(func, block)).copied() {
+        let id = if let Some(old_ssa_block) = self.created_ssa_blocks.get(&(func, block)).copied() {
             self.ssa.cfg[old_ssa_block] = ssa_block;
             old_ssa_block
         } else {
@@ -59,7 +64,28 @@ impl AIContext {
             self.ssa.cfg.push(ssa_block);
             self.created_ssa_blocks.insert((func, block), id);
             id
+        };
+
+        self.intraprocedural_block_deps.entry(id).or_default();
+        self.interprocedural_call_deps.entry(func).or_default();
+        match self.ssa.cfg[id] {
+            SSABlock::Entry => {}
+            SSABlock::Guard(pred, ..)
+            | SSABlock::Store(pred, ..)
+            | SSABlock::Return(pred, ..) => {
+                self.intraprocedural_block_deps.entry(pred).or_default().insert(id);
+            }
+            SSABlock::Call(pred, callee, ..) => {
+                self.intraprocedural_block_deps.entry(pred).or_default().insert(id);
+                self.interprocedural_call_deps.entry(func).or_default().insert(callee);
+            }
+            SSABlock::Merge(pred1, pred2) => {
+                self.intraprocedural_block_deps.entry(pred1).or_default().insert(id);
+                self.intraprocedural_block_deps.entry(pred2).or_default().insert(id);
+            }
         }
+
+        id
     }
 
     fn update_state(&mut self, func: Symbol, block: BlockId, state: AIState) {
@@ -114,8 +140,8 @@ impl AIContext {
             .collect();
         let ssa_block = self.set_block(func, block, SSABlock::Entry);
         let state = AIState { vars, ssa_block };
-        self.update_state(func, block, state);
         self.ssa.entries.insert(func, ssa_block);
+        self.update_state(func, block, state);
     }
 
     fn visit_guard(&mut self, func: Symbol, block: BlockId, pred: BlockId, cond: &Expr) {
@@ -293,6 +319,7 @@ impl AIContext {
 
             state.ssa_block =
                 self.set_block(func, block, SSABlock::Return(state.ssa_block, values));
+            self.ssa.exits.insert(func, state.ssa_block);
             self.update_state(func, block, state);
         }
     }

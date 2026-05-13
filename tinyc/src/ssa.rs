@@ -40,6 +40,7 @@ pub struct SSAProgram {
     pub dfg: EGraph<Dataflow, IntervalAnalysis>,
     pub cfg: Vec<SSABlock>,
     pub entries: FxHashMap<Symbol, SSABlockId>,
+    pub exits: FxHashMap<Symbol, SSABlockId>,
 
     // Intern tuples of function name, parameter index, and analysis to ParamId.
     pub param_map: FxHashMap<(Symbol, usize, Interval), ParamId>,
@@ -62,10 +63,6 @@ impl SSAProgram {
 
     pub fn set_block(&mut self, block: SSABlock, id: SSABlockId) {
         self.cfg[id] = block;
-    }
-
-    pub fn add_entry(&mut self, function: Symbol, block: SSABlockId) {
-        self.entries.insert(function, block);
     }
 
     pub fn is_always_false(&mut self, value: Id) -> bool {
