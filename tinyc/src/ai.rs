@@ -162,7 +162,8 @@ impl AIContext {
                         if value1 == value2 {
                             new_vars.insert(*var, *value1);
                         } else {
-                            let knot = self.ssa.intern_knot(ssa_block, *var, Interval::top());
+                            let joined = self.ssa.analysis(*value1).join(&self.ssa.analysis(*value2));
+                            let knot = self.ssa.intern_knot(ssa_block, *var, joined);
                             let knot = self.ssa.add_data(Dataflow::Knot(knot));
                             new_vars.insert(*var, knot);
                         }
