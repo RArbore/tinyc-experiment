@@ -151,10 +151,18 @@ impl AIContext {
             self.widening_ssa_blocks.extend(headers);
             self.widening_funcs_dirty = false;
         }
+
         self.widening_ssa_blocks.contains(&id)
     }
 
     fn is_widening_func(&mut self, func: Symbol) -> bool {
+        if self.widening_funcs_dirty {
+            let headers =
+                cycle_headers(&self.interprocedural_call_deps, ["main".into()].into_iter());
+            self.widening_funcs.extend(headers);
+            self.widening_funcs_dirty = false;
+        }
+
         self.widening_funcs.contains(&func)
     }
 
@@ -311,6 +319,7 @@ impl AIContext {
         args: &Vec<Expr>,
     ) {
         if let Some(mut state) = self.states.get(&(func, pred)).cloned() {
+            let is_widening = self.is_widening_func(callee);
             let arg_values: Vec<_> = args
                 .iter()
                 .map(|expr| self.add_expr(expr, &state))
@@ -318,9 +327,13 @@ impl AIContext {
             let mut changed = false;
             if let Some(input_analysis) = self.input_analysis.get_mut(&callee) {
                 for (old_analysis, arg_value) in zip(input_analysis.iter_mut(), &arg_values) {
-                    let joined = old_analysis.join(&self.ssa.analysis(*arg_value));
-                    if *old_analysis != joined {
-                        *old_analysis = joined;
+                    let new_analysis = if is_widening {
+                        old_analysis.widen(&self.ssa.analysis(*arg_value))
+                    } else {
+                        old_analysis.join(&self.ssa.analysis(*arg_value))
+                    };
+                    if *old_analysis != new_analysis {
+                        *old_analysis = new_analysis;
                         changed = true;
                     }
                 }
@@ -346,7 +359,7 @@ impl AIContext {
             self.callers
                 .entry(callee)
                 .or_default()
-                .insert((func, state.ssa_block));
+                .insert((func, block));
 
             if let Some(output_analysis) = self.output_analysis.get(&callee).cloned() {
                 for (idx, var) in vars.iter().enumerate() {
@@ -363,6 +376,7 @@ impl AIContext {
 
     fn visit_return(&mut self, func: Symbol, block: BlockId, pred: BlockId, exprs: &Vec<Expr>) {
         if let Some(mut state) = self.states.get(&(func, pred)).cloned() {
+            let is_widening = self.is_widening_func(func);
             let values: Vec<_> = exprs
                 .iter()
                 .map(|expr| self.add_expr(expr, &state))
@@ -370,7 +384,10 @@ impl AIContext {
             let mut changed = false;
             if let Some(output_analysis) = self.output_analysis.get_mut(&func) {
                 for (old_analysis, value) in zip(output_analysis.iter_mut(), &values) {
-                    let new_analysis = self.ssa.analysis(*value);
+                    let mut new_analysis = self.ssa.analysis(*value);
+                    if is_widening {
+                        new_analysis = old_analysis.widen(&new_analysis);
+                    }
                     if *old_analysis != new_analysis {
                         *old_analysis = new_analysis;
                         changed = true;
@@ -387,7 +404,8 @@ impl AIContext {
                 changed = true;
             }
             if changed {
-                self.to_visit.extend(self.callers[&func].iter().copied());
+                let callers = self.callers[&func].iter().copied();
+                self.to_visit.extend(callers);
             }
 
             state.ssa_block =
@@ -531,9 +549,12 @@ mod tests {
         graph.entry(2).or_default().insert(3);
         graph.entry(3).or_default().insert(4);
         graph.entry(4).or_default().insert(1);
+        graph.entry(0).or_default().insert(5);
+        graph.entry(5).or_default().insert(5);
         let headers = cycle_headers(&graph, [0].into_iter());
-        assert_eq!(headers.len(), 1);
+        assert_eq!(headers.len(), 2);
         assert!(headers.contains(&1) || headers.contains(&3) || headers.contains(&4));
+        assert!(headers.contains(&5));
     }
 
     #[test]
