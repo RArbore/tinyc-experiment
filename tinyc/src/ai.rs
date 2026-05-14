@@ -26,12 +26,14 @@ pub fn create_ssa(nonssa: &FxHashMap<Symbol, NonSSAFunc>) -> SSAProgram {
         widening_funcs_dirty: false,
         old_analysis_at_ssa_block: Default::default(),
         to_visit: vec![("main".into(), 0)],
+        knots_to_tie: Default::default(),
     };
 
     while let Some((func, block)) = context.to_visit.pop() {
         context.visit_block(&nonssa, func, block);
     }
 
+    context.tie_knots(&nonssa);
     context.ssa.canon_cfg();
     context.ssa
 }
@@ -57,6 +59,7 @@ struct AIContext {
     old_analysis_at_ssa_block: FxHashMap<SSABlockId, FxHashMap<Symbol, Interval>>,
 
     to_visit: Vec<(Symbol, BlockId)>,
+    knots_to_tie: FxHashSet<(Symbol, BlockId, Symbol)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -265,6 +268,7 @@ impl AIContext {
                             let knot = self.ssa.intern_knot(ssa_block, *var, analysis);
                             let knot = self.ssa.add_data(Dataflow::Knot(knot));
                             new_vars.insert(*var, knot);
+                            self.knots_to_tie.insert((func, block, *var));
                         }
                     }
                 }
@@ -434,6 +438,29 @@ impl AIContext {
             }
         }
     }
+
+    fn tie_knots(&mut self, nonssa: &FxHashMap<Symbol, NonSSAFunc>) {
+        for (func, block, var) in self.knots_to_tie.drain() {
+            let Block::Merge(pred1, pred2) = nonssa[&func].cfg[block] else {
+                panic!()
+            };
+            let state = &self.states[&(func, block)];
+            let pred_id1 = self.states[&(func, pred1)].vars[&var];
+            let pred_id2 = self.states[&(func, pred2)].vars[&var];
+            let phi = self
+                .ssa
+                .add_data(Dataflow::Phi(state.ssa_block, [pred_id1, pred_id2]));
+            self.ssa.dfg.union(phi, state.vars[&var]);
+            self.ssa.dfg[phi].nodes.retain(|node| {
+                if let Dataflow::Knot(_) = node {
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        self.ssa.dfg.rebuild();
+    }
 }
 
 fn deps(
@@ -570,9 +597,14 @@ fn foo(x, y) return x + y;
             .collect();
         let ssa = create_ssa(&nonssa);
 
-        let SSABlock::Return(_, values) = &ssa.cfg[ssa.exits[&("main".into())]] else { panic!() };
+        let SSABlock::Return(_, values) = &ssa.cfg[ssa.exits[&("main".into())]] else {
+            panic!()
+        };
         assert_eq!(values.len(), 1);
-        assert!(ssa.analysis(values[0]).leq(&Interval::from_low_high(16, 36)));
+        assert!(
+            ssa.analysis(values[0])
+                .leq(&Interval::from_low_high(16, 36))
+        );
     }
 
     #[test]
@@ -620,7 +652,9 @@ fn main() { x = 1; while x < 100 { x = x + (1 * 5); } return x; }
             .collect();
         let ssa = create_ssa(&nonssa);
 
-        let SSABlock::Return(_, values) = &ssa.cfg[ssa.exits[&("main".into())]] else { panic!() };
+        let SSABlock::Return(_, values) = &ssa.cfg[ssa.exits[&("main".into())]] else {
+            panic!()
+        };
         assert_eq!(values.len(), 1);
         assert!(ssa.analysis(values[0]).leq(&Interval::from_low(1)));
     }
@@ -655,7 +689,9 @@ fn foo(x) { if x { x <- foo(x - 1); return x + 1; } else { return 0; } }
             .collect();
         let ssa = create_ssa(&nonssa);
 
-        let SSABlock::Return(_, values) = &ssa.cfg[ssa.exits[&("main".into())]] else { panic!() };
+        let SSABlock::Return(_, values) = &ssa.cfg[ssa.exits[&("main".into())]] else {
+            panic!()
+        };
         assert_eq!(values.len(), 1);
         assert!(ssa.analysis(values[0]).leq(&Interval::from_low(0)));
     }
