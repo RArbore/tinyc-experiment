@@ -65,13 +65,11 @@ impl SSAProgram {
         self.cfg[id] = block;
     }
 
-    pub fn is_always_false(&mut self, value: Id) -> bool {
-        self.dfg.rebuild();
+    pub fn is_always_false(&self, value: Id) -> bool {
         self.dfg[value].nodes.contains(&Dataflow::Constant(0))
     }
 
-    pub fn analysis(&mut self, value: Id) -> Interval {
-        self.dfg.rebuild();
+    pub fn analysis(&self, value: Id) -> Interval {
         self.dfg[value].data
     }
 

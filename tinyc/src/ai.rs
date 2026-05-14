@@ -568,7 +568,11 @@ fn foo(x, y) return x + y;
             .into_iter()
             .map(|(name, func)| (name, convert_to_cfg(func)))
             .collect();
-        let _ssa = create_ssa(&nonssa);
+        let ssa = create_ssa(&nonssa);
+
+        let SSABlock::Return(_, values) = &ssa.cfg[ssa.exits[&("main".into())]] else { panic!() };
+        assert_eq!(values.len(), 1);
+        assert!(ssa.analysis(values[0]).leq(&Interval::from_low_high(16, 36)));
     }
 
     #[test]
@@ -582,7 +586,9 @@ fn foo(x) { x <- foo(x + 1); return x; }
             .into_iter()
             .map(|(name, func)| (name, convert_to_cfg(func)))
             .collect();
-        let _ssa = create_ssa(&nonssa);
+        let ssa = create_ssa(&nonssa);
+
+        assert!(ssa.exits.is_empty());
     }
 
     #[test]
@@ -596,7 +602,10 @@ fn foo(x) { return x; }
             .into_iter()
             .map(|(name, func)| (name, convert_to_cfg(func)))
             .collect();
-        let _ssa = create_ssa(&nonssa);
+        let ssa = create_ssa(&nonssa);
+
+        assert_eq!(ssa.entries.len(), 1);
+        assert_eq!(ssa.exits.len(), 1);
     }
 
     #[test]
@@ -609,7 +618,11 @@ fn main() { x = 1; while x < 100 { x = x + (1 * 5); } return x; }
             .into_iter()
             .map(|(name, func)| (name, convert_to_cfg(func)))
             .collect();
-        let _ssa = create_ssa(&nonssa);
+        let ssa = create_ssa(&nonssa);
+
+        let SSABlock::Return(_, values) = &ssa.cfg[ssa.exits[&("main".into())]] else { panic!() };
+        assert_eq!(values.len(), 1);
+        assert!(ssa.analysis(values[0]).leq(&Interval::from_low(1)));
     }
 
     #[test]
@@ -624,7 +637,9 @@ fn baz() { return 42; }
             .into_iter()
             .map(|(name, func)| (name, convert_to_cfg(func)))
             .collect();
-        let _ssa = create_ssa(&nonssa);
+        let ssa = create_ssa(&nonssa);
+
+        assert!(ssa.exits.is_empty());
     }
 
     #[test]
@@ -638,6 +653,10 @@ fn foo(x) { if x { x <- foo(x - 1); return x + 1; } else { return 0; } }
             .into_iter()
             .map(|(name, func)| (name, convert_to_cfg(func)))
             .collect();
-        let _ssa = create_ssa(&nonssa);
+        let ssa = create_ssa(&nonssa);
+
+        let SSABlock::Return(_, values) = &ssa.cfg[ssa.exits[&("main".into())]] else { panic!() };
+        assert_eq!(values.len(), 1);
+        assert!(ssa.analysis(values[0]).leq(&Interval::from_low(0)));
     }
 }
