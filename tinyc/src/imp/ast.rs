@@ -1,13 +1,8 @@
 use core::fmt::{Display, Formatter, Result};
-use core::iter::zip;
-use core::mem::take;
 
-use egg::{Id, Symbol};
-use rustc_hash::FxHashMap;
+use egg::Symbol;
 
-use crate::analysis::interval::Interval;
-use crate::nonssa::{Expr, UnaryOp};
-use crate::ssa::{Dataflow, SSABlock, SSABlockId, SSAProgram};
+use crate::nonssa::{Block, BlockId, Expr, NonSSAFunc, UnaryOp};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImpFunc {
@@ -48,224 +43,115 @@ pub enum ImpStmt {
     },
 }
 
-pub fn naive_ssa_translate(program: &FxHashMap<Symbol, ImpFunc>) -> SSAProgram {
-    let mut ssa = SSAProgram::default();
-    for (name, func) in program {
-        let vars = func
-            .params
-            .iter()
-            .enumerate()
-            .map(|(idx, param)| {
-                let param_id = ssa.intern_param(*name, idx, Interval::top());
-                let id = ssa.add_data(Dataflow::Param(param_id));
-                (*param, id)
-            })
-            .collect();
-        let entry = ssa.add_block(SSABlock::Entry);
-        ssa.entries.insert(*name, entry);
-        let mut context = FuncSSAContext {
-            ssa,
-            vars,
-            block: Some(entry),
-            returns: FxHashMap::default(),
-        };
-        context.visit_stmt(&func.body);
+pub fn convert_to_cfg(func: ImpFunc) -> NonSSAFunc {
+    let mut convert_context = ConvertContext {
+        cfg: vec![Block::Entry],
+        returns: vec![],
+        num_returned: None,
+    };
+    convert_context.convert(0, func.body);
 
-        ssa = context.ssa;
-        let mut returns = context.returns.drain();
-        let (mut block, mut ids) = returns.next().unwrap();
-        for (other_block, other_ids) in returns {
-            block = ssa.add_block(SSABlock::Merge(block, other_block));
-            for (id, other_id) in zip(ids.iter_mut(), other_ids) {
-                if *id != other_id {
-                    *id = ssa.add_data(Dataflow::Phi(block, [*id, other_id]));
-                }
-            }
+    if let Some(mut block) = convert_context.returns.get(0).copied() {
+        for idx in 1..convert_context.returns.len() {
+            block = convert_context.add_block(Block::Merge(block, convert_context.returns[idx]));
         }
-        let return_block = ssa.add_block(SSABlock::Return(block, ids));
-        ssa.exits.insert(*name, return_block);
+        convert_context.add_block(Block::Return(
+            block,
+            (0..convert_context.num_returned.unwrap())
+                .map(|idx| Expr::Variable(Symbol::from(format!("%{}", idx))))
+                .collect(),
+        ));
     }
 
-    ssa
+    NonSSAFunc {
+        name: func.name,
+        params: func.params,
+        cfg: convert_context.cfg,
+    }
 }
 
-struct FuncSSAContext {
-    ssa: SSAProgram,
-    vars: FxHashMap<Symbol, Id>,
-    block: Option<SSABlockId>,
-    returns: FxHashMap<SSABlockId, Vec<Id>>,
+struct ConvertContext {
+    cfg: Vec<Block>,
+    returns: Vec<BlockId>,
+    num_returned: Option<usize>,
 }
 
-impl FuncSSAContext {
-    fn visit_stmt(&mut self, stmt: &ImpStmt) {
+impl ConvertContext {
+    fn add_block(&mut self, block: Block) -> BlockId {
+        let id = self.cfg.len();
+        self.cfg.push(block);
+        id
+    }
+
+    fn convert(&mut self, pred: BlockId, stmt: ImpStmt) -> Option<BlockId> {
         match stmt {
-            ImpStmt::Block { body } => self.visit_block(body),
-            ImpStmt::Assign { var, expr } => self.visit_assign(*var, expr),
-            ImpStmt::Store { pointer, expr } => self.visit_store(pointer, expr),
-            ImpStmt::Call { vars, callee, args } => self.visit_call(vars, *callee, args),
+            ImpStmt::Block { body } => {
+                let mut id = pred;
+                for stmt in body {
+                    id = self.convert(id, stmt)?;
+                }
+                Some(id)
+            }
+            ImpStmt::Assign { var, expr } => Some(self.add_block(Block::Assign(pred, var, expr))),
+            ImpStmt::Store { pointer, expr } => {
+                Some(self.add_block(Block::Store(pred, pointer, expr)))
+            }
+            ImpStmt::Call { vars, callee, args } => {
+                Some(self.add_block(Block::Call(pred, vars, callee, args)))
+            }
             ImpStmt::IfElse {
                 cond,
                 then_body,
                 else_body,
-            } => self.visit_ifelse(cond, then_body, else_body),
-            ImpStmt::While { cond, body } => self.visit_while(cond, body),
-            ImpStmt::Return { exprs } => self.visit_return(exprs),
-        }
-    }
-
-    fn visit_block(&mut self, body: &Vec<ImpStmt>) {
-        for stmt in body {
-            self.visit_stmt(stmt);
-            if self.block.is_none() {
-                return;
-            }
-        }
-    }
-
-    fn visit_assign(&mut self, var: Symbol, expr: &Expr) {
-        let id = self.add_expr(expr);
-        self.vars.insert(var, id);
-    }
-
-    fn visit_store(&mut self, pointer: &Expr, expr: &Expr) {
-        let pointer = self.add_expr(pointer);
-        let expr = self.add_expr(expr);
-        let store = self
-            .ssa
-            .add_block(SSABlock::Store(self.block.unwrap(), pointer, expr));
-        self.block = Some(store);
-    }
-
-    fn visit_call(&mut self, vars: &Vec<Symbol>, callee: Symbol, args: &Vec<Expr>) {
-        let ids = args.iter().map(|expr| self.add_expr(expr)).collect();
-        let call = self
-            .ssa
-            .add_block(SSABlock::Call(self.block.unwrap(), callee, ids));
-        self.block = Some(call);
-        for (idx, var) in vars.iter().enumerate() {
-            let call = self.ssa.intern_call(call, idx, Interval::top());
-            let call = self.ssa.add_data(Dataflow::Call(call));
-            self.vars.insert(*var, call);
-        }
-    }
-
-    fn visit_ifelse(&mut self, cond: &Expr, then_body: &ImpStmt, else_body: &ImpStmt) {
-        let then_cond = self.add_expr(cond);
-        let else_cond = self.ssa.add_data(Dataflow::Unary(UnaryOp::Not, then_cond));
-        let then_guard = self
-            .ssa
-            .add_block(SSABlock::Guard(self.block.unwrap(), then_cond));
-        let else_guard = self
-            .ssa
-            .add_block(SSABlock::Guard(self.block.unwrap(), else_cond));
-        let before_vars = self.vars.clone();
-        self.block = Some(then_guard);
-        self.visit_stmt(then_body);
-        let then_vars = take(&mut self.vars);
-        let then_block = self.block;
-        self.vars = before_vars;
-        self.block = Some(else_guard);
-        self.visit_stmt(else_body);
-        let else_vars = take(&mut self.vars);
-        let else_block = self.block;
-        match (then_block, else_block) {
-            (Some(then_block), Some(else_block)) => {
-                let merge = self.ssa.add_block(SSABlock::Merge(then_block, else_block));
-                for (var, then_id) in then_vars {
-                    if let Some(else_id) = else_vars.get(&var).copied() {
-                        let phi = self.ssa.add_data(Dataflow::Phi(merge, [then_id, else_id]));
-                        self.vars.insert(var, phi);
+            } => {
+                let then_guard = self.add_block(Block::Guard(pred, cond.clone()));
+                let else_guard = self.add_block(Block::Guard(
+                    pred,
+                    Expr::Unary {
+                        op: UnaryOp::Not,
+                        input: Box::new(cond),
+                    },
+                ));
+                let then_block = self.convert(then_guard, *then_body);
+                let else_block = self.convert(else_guard, *else_body);
+                match (then_block, else_block) {
+                    (Some(then_block), Some(else_block)) => {
+                        Some(self.add_block(Block::Merge(then_block, else_block)))
                     }
+                    (None, block) | (block, None) => block,
                 }
-                self.block = Some(merge);
             }
-            (None, block) => {
-                self.block = block;
-                self.vars = else_vars;
+            ImpStmt::While { cond, body } => {
+                let header = self.add_block(Block::Entry);
+                let then_guard = self.add_block(Block::Guard(header, cond.clone()));
+                let else_guard = self.add_block(Block::Guard(
+                    header,
+                    Expr::Unary {
+                        op: UnaryOp::Not,
+                        input: Box::new(cond),
+                    },
+                ));
+                let body_block = self.convert(then_guard, *body);
+                self.cfg[header] = if let Some(body_block) = body_block {
+                    Block::Merge(pred, body_block)
+                } else {
+                    Block::Guard(pred, Expr::Number(1))
+                };
+                Some(else_guard)
             }
-            (block, None) => {
-                self.block = block;
-                self.vars = then_vars;
-            }
-        }
-    }
-
-    fn visit_while(&mut self, cond: &Expr, body: &ImpStmt) {
-        let init_vars = self.vars.clone();
-        let before_header = self.block.unwrap();
-        let header = self.ssa.add_block(SSABlock::Entry);
-        for (var, id) in self.vars.iter_mut() {
-            let knot = self.ssa.intern_knot(header, *var, Interval::top());
-            let knot = self.ssa.add_data(Dataflow::Knot(knot));
-            *id = knot;
-        }
-        self.block = Some(header);
-        let then_cond = self.add_expr(cond);
-        let else_cond = self.ssa.add_data(Dataflow::Unary(UnaryOp::Not, then_cond));
-        let then_guard = self.ssa.add_block(SSABlock::Guard(header, then_cond));
-        let else_guard = self.ssa.add_block(SSABlock::Guard(header, else_cond));
-        self.block = Some(then_guard);
-        self.visit_stmt(body);
-        if let Some(iter_block) = self.block {
-            self.ssa
-                .set_block(SSABlock::Merge(before_header, iter_block), header);
-            for (var, init) in init_vars {
-                let iter = self.vars[&var];
-                let phi = self.ssa.add_data(Dataflow::Phi(header, [init, iter]));
-                let knot = self.ssa.intern_knot(header, var, Interval::top());
-                let knot = self.ssa.add_data(Dataflow::Knot(knot));
-                self.ssa.dfg.union(phi, knot);
-                self.ssa.dfg[phi].nodes.retain(|node| {
-                    if let Dataflow::Knot(_) = node {
-                        false
-                    } else {
-                        true
-                    }
-                });
-            }
-            self.block = Some(else_guard);
-        } else {
-            self.vars = init_vars.clone();
-            self.block = Some(before_header);
-            let then_cond = self.add_expr(cond);
-            let else_cond = self.ssa.add_data(Dataflow::Unary(UnaryOp::Not, then_cond));
-            let then_guard = self
-                .ssa
-                .add_block(SSABlock::Guard(before_header, then_cond));
-            let else_guard = self
-                .ssa
-                .add_block(SSABlock::Guard(before_header, else_cond));
-            self.block = Some(then_guard);
-            self.visit_stmt(body);
-            assert!(self.block.is_none());
-            self.vars = init_vars;
-            self.block = Some(else_guard);
-        }
-    }
-
-    fn visit_return(&mut self, exprs: &Vec<Expr>) {
-        let ids = exprs.iter().map(|expr| self.add_expr(expr)).collect();
-        self.returns.insert(self.block.unwrap(), ids);
-        self.block = None;
-    }
-
-    fn add_expr(&mut self, expr: &Expr) -> Id {
-        match expr {
-            Expr::Number(cons) => self.ssa.add_data(Dataflow::Constant(*cons)),
-            Expr::Variable(var) => self.vars[var],
-            Expr::Unary { op, input } => {
-                let input = self.add_expr(input);
-                self.ssa.add_data(Dataflow::Unary(*op, input))
-            }
-            Expr::Binary { op, lhs, rhs } => {
-                let lhs = self.add_expr(lhs);
-                let rhs = self.add_expr(rhs);
-                self.ssa.add_data(Dataflow::Binary(*op, [lhs, rhs]))
-            }
-            Expr::Load { pointer } => {
-                let pointer = self.add_expr(pointer);
-                self.ssa
-                    .add_data(Dataflow::Load(self.block.unwrap(), pointer))
+            ImpStmt::Return { exprs } => {
+                let mut block = pred;
+                assert!(self.num_returned.is_none() || self.num_returned == Some(exprs.len()));
+                self.num_returned = Some(exprs.len());
+                for (idx, expr) in exprs.into_iter().enumerate() {
+                    block = self.add_block(Block::Assign(
+                        block,
+                        Symbol::from(format!("%{}", idx)),
+                        expr,
+                    ));
+                }
+                self.returns.push(block);
+                None
             }
         }
     }
