@@ -194,8 +194,8 @@ impl FuncSSAContext {
         let init_vars = self.vars.clone();
         let before_header = self.block.unwrap();
         let header = self.ssa.add_block(SSABlock::Entry);
-        for (var, id) in self.vars.iter_mut() {
-            let knot = self.ssa.intern_knot(header, *var, Interval::top());
+        for (idx, (_, id)) in self.vars.iter_mut().enumerate() {
+            let knot = self.ssa.intern_knot(header, idx.into(), Interval::top());
             let knot = self.ssa.add_data(Dataflow::Knot(knot));
             *id = knot;
         }
@@ -209,10 +209,10 @@ impl FuncSSAContext {
         if let Some(iter_block) = self.block {
             self.ssa
                 .set_block(SSABlock::Merge(before_header, iter_block), header);
-            for (var, init) in init_vars {
+            for (idx, (var, init)) in init_vars.into_iter().enumerate() {
                 let iter = self.vars[&var];
                 let phi = self.ssa.add_data(Dataflow::Phi(header, [init, iter]));
-                let knot = self.ssa.intern_knot(header, var, Interval::top());
+                let knot = self.ssa.intern_knot(header, idx.into(), Interval::top());
                 let knot = self.ssa.add_data(Dataflow::Knot(knot));
                 self.ssa.dfg.union(phi, knot);
                 self.ssa.dfg[phi].nodes.retain(|node| {

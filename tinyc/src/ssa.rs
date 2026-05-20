@@ -43,11 +43,15 @@ pub struct SSAProgram {
     pub exits: FxHashMap<Symbol, SSABlockId>,
 
     // Intern tuples of function name, parameter index, and analysis to ParamId.
-    pub param_map: FxHashMap<(Symbol, usize, Interval), ParamId>,
-    // Intern tuples of BlockId, variable name, and analysis to KnotId.
-    pub knot_map: FxHashMap<(SSABlockId, Symbol, Interval), KnotId>,
+    param_interner: FxHashMap<(Symbol, usize, Interval), ParamId>,
+    params: Vec<(Symbol, usize, Interval)>,
+    // Intern tuples of BlockId, a variable identifier (Id of a phi in our case), and analysis to
+    // KnotId.
+    knot_interner: FxHashMap<(SSABlockId, Id, Interval), KnotId>,
+    knots: Vec<(SSABlockId, Id, Interval)>,
     // Intern tuples of BlockId (of a Call node), return value index, and analysis to CallId.
-    pub call_map: FxHashMap<(SSABlockId, usize, Interval), CallId>,
+    call_interner: FxHashMap<(SSABlockId, usize, Interval), CallId>,
+    calls: Vec<(SSABlockId, usize, Interval)>,
 }
 
 impl SSAProgram {
@@ -90,36 +94,59 @@ impl SSAProgram {
     }
 
     pub fn intern_param(&mut self, function: Symbol, idx: usize, analysis: Interval) -> ParamId {
-        if let Some(id) = self.param_map.get(&(function, idx, analysis)) {
+        if let Some(id) = self.param_interner.get(&(function, idx, analysis)) {
             *id
         } else {
-            let id = self.param_map.len();
-            self.param_map.insert((function, idx, analysis), id);
+            let id = self.param_interner.len();
+            self.param_interner.insert((function, idx, analysis), id);
+            assert_eq!(id, self.params.len());
+            self.params.push((function, idx, analysis));
             self.dfg.analysis.param_intervals.push(analysis);
             id
         }
     }
 
-    pub fn intern_knot(&mut self, block: SSABlockId, var: Symbol, analysis: Interval) -> ParamId {
-        if let Some(id) = self.knot_map.get(&(block, var, analysis)) {
+    pub fn intern_knot(
+        &mut self,
+        old_block: SSABlockId,
+        old_phi_id: Id,
+        analysis: Interval,
+    ) -> ParamId {
+        if let Some(id) = self.knot_interner.get(&(old_block, old_phi_id, analysis)) {
             *id
         } else {
-            let id = self.knot_map.len();
-            self.knot_map.insert((block, var, analysis), id);
+            let id = self.knot_interner.len();
+            self.knot_interner.insert((old_block, old_phi_id, analysis), id);
+            assert_eq!(id, self.knots.len());
+            self.knots.push((old_block, old_phi_id, analysis));
             self.dfg.analysis.knot_intervals.push(analysis);
             id
         }
     }
 
     pub fn intern_call(&mut self, caller: SSABlockId, idx: usize, analysis: Interval) -> ParamId {
-        if let Some(id) = self.call_map.get(&(caller, idx, analysis)) {
+        if let Some(id) = self.call_interner.get(&(caller, idx, analysis)) {
             *id
         } else {
-            let id = self.call_map.len();
-            self.call_map.insert((caller, idx, analysis), id);
+            let id = self.call_interner.len();
+            self.call_interner.insert((caller, idx, analysis), id);
+            assert_eq!(id, self.calls.len());
+            self.calls.push((caller, idx, analysis));
             self.dfg.analysis.call_intervals.push(analysis);
             id
         }
+    }
+
+    pub fn param(&self, id: ParamId) -> (Symbol, usize, Interval) {
+        self.params[id]
+    }
+
+    pub fn knot(&self, id: KnotId) -> (SSABlockId, Id, Interval) {
+        self.knots[id]
+    }
+
+    pub fn call(&self, id: CallId) -> (SSABlockId, usize, Interval) {
+        self.calls[id]
     }
 }
 
@@ -160,23 +187,23 @@ impl Display for SSAProgram {
             writeln!(f, "{}: {}", func, entry)?;
         }
 
-        if !self.param_map.is_empty() {
+        if !self.param_interner.is_empty() {
             writeln!(f, "\nParam IDs:")?;
-            for ((func, idx, analysis), id) in &self.param_map {
+            for ((func, idx, analysis), id) in &self.param_interner {
                 writeln!(f, "{}, {}, {}: {}", func, idx, analysis, id)?;
             }
         }
 
-        if !self.knot_map.is_empty() {
+        if !self.knot_interner.is_empty() {
             writeln!(f, "\nKnot IDs:")?;
-            for ((block, var, analysis), id) in &self.knot_map {
+            for ((block, var, analysis), id) in &self.knot_interner {
                 writeln!(f, "{}, {}, {}: {}", block, var, analysis, id)?;
             }
         }
 
-        if !self.call_map.is_empty() {
+        if !self.call_interner.is_empty() {
             writeln!(f, "\nCall IDs:")?;
-            for ((caller, idx, analysis), id) in &self.call_map {
+            for ((caller, idx, analysis), id) in &self.call_interner {
                 writeln!(f, "{}, {}, {}: {}", caller, idx, analysis, id)?;
             }
         }
