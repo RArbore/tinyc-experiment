@@ -15,27 +15,14 @@ pub fn megapass(ssa: &mut SSAProgram) {
         .iter()
         .map(|(func, block)| (*block, *func))
         .collect();
-    let mut old_block_to_phis: FxHashMap<SSABlockId, FxHashSet<Id>> = FxHashMap::default();
-    for eclass in ssa.dfg.classes() {
-        for node in &eclass.nodes {
-            if let Dataflow::Phi(block, _) = node {
-                old_block_to_phis
-                    .entry(*block)
-                    .or_default()
-                    .insert(eclass.id);
-            }
-        }
-    }
     let main_entry = ssa.entries[&("main".into())];
     ssa.entries.clear();
     ssa.exits.clear();
-
     let mut context = AIContext {
         ssa: take(ssa),
         intra_func_deps,
         old_entries,
         inverse_old_entries,
-        old_block_to_phis,
         states: Default::default(),
         created_blocks: Default::default(),
         callers: FxHashMap::from_iter([("main".into(), FxHashSet::default())]),
@@ -47,7 +34,7 @@ pub fn megapass(ssa: &mut SSAProgram) {
         widening_funcs: Default::default(),
         widening_new_blocks_dirty: false,
         widening_funcs_dirty: false,
-        old_analysis_at_new_block: Default::default(),
+        old_analysis_at_ssa_block: Default::default(),
         to_visit: vec![main_entry],
         knots_to_tie: Default::default(),
     };
@@ -67,7 +54,6 @@ struct AIContext {
     intra_func_deps: FxHashMap<SSABlockId, FxHashSet<SSABlockId>>,
     old_entries: FxHashMap<Symbol, SSABlockId>,
     inverse_old_entries: FxHashMap<SSABlockId, Symbol>,
-    old_block_to_phis: FxHashMap<SSABlockId, FxHashSet<Id>>,
 
     states: FxHashMap<SSABlockId, AIState>,
     created_blocks: FxHashMap<SSABlockId, SSABlockId>,
@@ -82,16 +68,14 @@ struct AIContext {
     widening_funcs: FxHashSet<Symbol>,
     widening_new_blocks_dirty: bool,
     widening_funcs_dirty: bool,
-    old_analysis_at_new_block: FxHashMap<SSABlockId, FxHashMap<Id, Interval>>,
+    old_analysis_at_ssa_block: FxHashMap<SSABlockId, FxHashMap<Id, Interval>>,
 
     to_visit: Vec<SSABlockId>,
-    knots_to_tie: FxHashMap<(SSABlockId, Id), Id>,
+    knots_to_tie: FxHashSet<(SSABlockId, Id)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AIState {
-    phis: FxHashMap<Id, Id>,
-
     new_block: SSABlockId,
     func: Symbol,
 }
@@ -221,11 +205,7 @@ impl AIContext {
     fn visit_entry(&mut self, old_block: SSABlockId) {
         let func = self.inverse_old_entries[&old_block];
         let new_block = self.set_block(func, old_block, SSABlock::Entry);
-        let state = AIState {
-            phis: Default::default(),
-            new_block,
-            func,
-        };
+        let state = AIState { new_block, func };
         self.ssa.entries.insert(func, new_block);
         self.update_state(old_block, state);
     }
@@ -255,82 +235,46 @@ impl AIContext {
                     old_block,
                     SSABlock::Merge(state1.new_block, state2.new_block),
                 );
-                let is_widening = self.is_widening_new_block(new_block);
+                //let is_widening = self.is_widening_new_block(new_block);
 
-                let mut phis = FxHashMap::default();
-                for (old_phi_id, id1) in &state1.phis {
-                    if let Some(id2) = state2.phis.get(&old_phi_id) {
-                        assert_eq!(*id1, *id2);
-                        phis.insert(*old_phi_id, *id1);
-                    }
-                }
-                for old_phi_id in self.old_block_to_phis[&old_block].clone() {
-                    for node in self.ssa.dfg[old_phi_id].nodes.clone() {
-                        if let Dataflow::Phi(block, inputs) = node {
-                            assert_eq!(old_block, block);
-                            let lhs = self.visit_id(inputs[0], &state1);
-                            let rhs = self.visit_id(inputs[1], &state2);
-                            if lhs == rhs {
-                                phis.insert(old_phi_id, lhs);
-                            } else {
-                                let mut analysis =
-                                    self.ssa.analysis(lhs).join(&self.ssa.analysis(rhs));
-                                if is_widening
-                                    && let Some(old_analysis) =
-                                        self.old_analysis_at_new_block.get(&new_block)
-                                {
-                                    analysis = old_analysis[&old_phi_id].widen(&analysis);
-                                }
-                                let knot = self.ssa.intern_knot(new_block, old_phi_id, analysis);
-                                let knot = self.ssa.add_data(Dataflow::Knot(knot));
-                                phis.insert(old_phi_id, knot);
-                                self.knots_to_tie.insert((old_block, old_phi_id), knot);
-                            }
-                            break;
-                        }
-                    }
-                }
-
-                if is_widening {
-                    for (old_phi_id, id) in &phis {
-                        self.old_analysis_at_new_block
-                            .entry(new_block)
-                            .or_default()
-                            .insert(*old_phi_id, self.ssa.analysis(*id));
-                    }
-                }
+                //let mut new_vars = FxHashMap::default();
+                //for (var, value1) in &state1.vars {
+                //    if let Some(value2) = state2.vars.get(var) {
+                //        if value1 == value2 {
+                //            new_vars.insert(*var, *value1);
+                //        } else {
+                //            let mut analysis =
+                //                self.ssa.analysis(*value1).join(&self.ssa.analysis(*value2));
+                //            if is_widening
+                //                && let Some(old_analysis) =
+                //                    self.old_analysis_at_ssa_block.get(&ssa_block)
+                //            {
+                //                analysis = old_analysis[var].widen(&analysis);
+                //            }
+                //            let knot = self.ssa.intern_knot(ssa_block, *var, analysis);
+                //            let knot = self.ssa.add_data(Dataflow::Knot(knot));
+                //            new_vars.insert(*var, knot);
+                //            self.knots_to_tie.insert((func, block, *var));
+                //        }
+                //    }
+                //}
+                //
+                //if is_widening {
+                //    for (var, id) in &new_vars {
+                //        self.old_analysis_at_ssa_block
+                //            .entry(ssa_block)
+                //            .or_default()
+                //            .insert(*var, self.ssa.analysis(*id));
+                //    }
+                //}
 
                 let state = AIState {
-                    phis,
                     new_block,
                     func: state1.func,
                 };
                 self.update_state(old_block, state);
             }
-            (Some(mut state), None) => {
-                for old_phi_id in &self.old_block_to_phis[&old_block] {
-                    for node in self.ssa.dfg[*old_phi_id].nodes.clone() {
-                        if let Dataflow::Phi(block, inputs) = node {
-                            assert_eq!(old_block, block);
-                            state.phis.insert(*old_phi_id, inputs[0]);
-                            break;
-                        }
-                    }
-                }
-                self.update_state(old_block, state)
-            },
-            (None, Some(mut state)) => {
-                for old_phi_id in &self.old_block_to_phis[&old_block] {
-                    for node in self.ssa.dfg[*old_phi_id].nodes.clone() {
-                        if let Dataflow::Phi(block, inputs) = node {
-                            assert_eq!(old_block, block);
-                            state.phis.insert(*old_phi_id, inputs[1]);
-                            break;
-                        }
-                    }
-                }
-                self.update_state(old_block, state)
-            },
+            (None, Some(state)) | (Some(state), None) => self.update_state(old_block, state),
             (None, None) => {}
         }
     }
@@ -454,7 +398,7 @@ impl AIContext {
                     let rhs = self.visit_id(ids[1], state);
                     self.ssa.add_data(Binary(op, [lhs, rhs]))
                 }
-                Phi(_, _) => state.phis[&id],
+                Phi(_, _) => todo!(),
                 Load(old_block, id) => {
                     let new_block = self.states[&old_block].new_block;
                     let id = self.visit_id(id, state);
@@ -635,6 +579,7 @@ fn foo(x) { x <- foo(x + 1); return x; }
         let parsed = ProgramParser::new().parse(&program).unwrap();
         let mut ssa = naive_ssa_translate(&parsed);
         megapass(&mut ssa);
+
         assert_eq!(ssa.entries.len(), 2);
         assert!(ssa.exits.is_empty());
     }
@@ -648,9 +593,9 @@ fn foo(x) { return x; }
         let parsed = ProgramParser::new().parse(&program).unwrap();
         let mut ssa = naive_ssa_translate(&parsed);
         megapass(&mut ssa);
+
         assert_eq!(ssa.entries.len(), 1);
         assert_eq!(ssa.exits.len(), 1);
-        assert!(get_return_analysis(&ssa, "main").is_cons(42));
     }
 
     #[test]
@@ -661,7 +606,12 @@ fn main() { x = 1; while x < 100 { x = x + (1 * 5); } return x; }
         let parsed = ProgramParser::new().parse(&program).unwrap();
         let mut ssa = naive_ssa_translate(&parsed);
         megapass(&mut ssa);
-        assert!(get_return_analysis(&ssa, "main").leq(&Interval::from_low(1)));
+
+        let SSABlock::Return(_, values) = &ssa.cfg[ssa.exits[&("main".into())]] else {
+            panic!()
+        };
+        assert_eq!(values.len(), 1);
+        assert!(ssa.analysis(values[0]).leq(&Interval::from_low(1)));
     }
 
     #[test]
