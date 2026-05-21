@@ -69,6 +69,10 @@ impl SSAProgram {
         self.dfg[value].nodes.contains(&Dataflow::Constant(0))
     }
 
+    pub fn is_always_true(&self, value: Id) -> bool {
+        !Interval::from_constant(0).leq(&self.dfg[value].data)
+    }
+
     pub fn analysis(&self, value: Id) -> Interval {
         self.dfg[value].data
     }

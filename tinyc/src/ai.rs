@@ -216,8 +216,10 @@ impl AIContext {
         if let Some(mut state) = self.states.get(&(func, pred)).cloned() {
             let value = self.add_expr(cond, &state);
             if !self.ssa.is_always_false(value) {
-                state.ssa_block =
-                    self.set_block(func, block, SSABlock::Guard(state.ssa_block, value));
+                if !self.ssa.is_always_true(value) {
+                    state.ssa_block =
+                        self.set_block(func, block, SSABlock::Guard(state.ssa_block, value));
+                }
                 self.update_state(func, block, state);
             }
         }
@@ -638,6 +640,7 @@ fn foo(x) { return x; }
 
         assert_eq!(ssa.entries.len(), 1);
         assert_eq!(ssa.exits.len(), 1);
+        assert_eq!(ssa.cfg.len() ,2);
     }
 
     #[test]
