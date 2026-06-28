@@ -549,6 +549,7 @@ fn dfs_helper<T>(
 mod tests {
     use rustc_hash::{FxHashMap, FxHashSet};
 
+    use crate::ai::create_ssa;
     use crate::imp::ast::convert_to_cfg;
     use crate::imp::grammar::ProgramParser;
 

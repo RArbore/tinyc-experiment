@@ -2,7 +2,7 @@ use core::cmp::max;
 use core::fmt::{Display, Formatter, Result};
 
 use egg::{EGraph, Id, Symbol, define_language};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use crate::analysis::interval::{Interval, IntervalAnalysis};
 use crate::nonssa::{BinaryOp, UnaryOp};
@@ -125,16 +125,6 @@ impl SSAProgram {
             id
         }
     }
-
-    fn mk(&mut self) -> Id {
-        let id = self.add_data(Dataflow::Param(ParamId::MAX));
-        self.dfg[id].nodes.clear();
-        id
-    }
-
-    pub fn subst(&mut self, root: Id, substs: &FxHashMap<Id, Id>) -> Id {
-        todo!()
-    }
 }
 
 impl Display for SSAProgram {
@@ -196,34 +186,5 @@ impl Display for SSAProgram {
         }
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::ai::create_ssa;
-    use crate::imp::ast::convert_to_cfg;
-    use crate::imp::grammar::ProgramParser;
-
-    use super::*;
-
-    #[test]
-    fn egraph_subst() {
-        let program = r#"
-fn main() { x = *0; y = *1; z = (1 * 5) + x; w = (1 * 5) + y; return x, y, z, w; }
-"#;
-        let parsed = ProgramParser::new().parse(&program).unwrap();
-        let nonssa = parsed
-            .into_iter()
-            .map(|(name, func)| (name, convert_to_cfg(func)))
-            .collect();
-        let mut ssa = create_ssa(&nonssa);
-        let SSABlock::Return(_, out) = ssa.cfg[1].clone() else {
-            panic!()
-        };
-        assert_ne!(out[2], out[3]);
-        let subst = FxHashMap::from_iter([(out[0], out[1])]);
-        let x_to_y = ssa.subst(out[2], &subst);
-        assert_eq!(x_to_y, out[3])
     }
 }
